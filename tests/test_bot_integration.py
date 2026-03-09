@@ -27,7 +27,7 @@ class TestBotModeIntegration:
         batcher = MessageBatcher(page_size=2, interval=0.1)
         batcher.on_batch = capture_batch
 
-        # Simulate messages
+        # Simulate messages (no status in input)
         msg1 = {
             "message_id": 1,
             "text": "hello",
@@ -53,7 +53,10 @@ class TestBotModeIntegration:
 
         assert len(batch_results) == 1
         assert len(batch_results[0]) == 2
-        assert batch_results[0][0]["status"] == "pending"
+        # Input format has no status, but has required fields
+        assert "status" not in batch_results[0][0]
+        assert batch_results[0][0]["id"] == 1
+        assert batch_results[0][0]["chat_id"] == 456
 
     @pytest.mark.asyncio
     async def test_bot_client_with_batcher(self):
@@ -113,8 +116,8 @@ class TestBotModeIntegration:
     async def test_exec_command_integration(self):
         """Test executor integration with message processing."""
         messages = [
-            {"id": 1, "text": "hello", "status": "pending"},
-            {"id": 2, "text": "world", "status": "pending"},
+            {"id": 1, "chat_id": 456, "text": "hello"},
+            {"id": 2, "chat_id": 456, "text": "world"},
         ]
 
         # Process through cat (identity transform)
@@ -162,4 +165,6 @@ class TestBotModeIntegration:
 
             # Verify messages
             assert len(formatted_messages) == 2
-            assert all(m["status"] == "pending" for m in formatted_messages)
+            # Input format: no status, has required fields
+            assert all("status" not in m for m in formatted_messages)
+            assert all("id" in m and "chat_id" in m for m in formatted_messages)

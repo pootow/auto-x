@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 
-def format_message(message: Any, chat_id: Optional[int] = None, status: str = "pending") -> str:
+def format_message(message: Any, chat_id: Optional[int] = None, include_status: bool = False) -> str:
     """Format a message as a JSON line.
 
     Handles both Telethon Message objects and Bot API message dicts.
@@ -13,7 +13,7 @@ def format_message(message: Any, chat_id: Optional[int] = None, status: str = "p
     Args:
         message: Telethon Message object or Bot API message dict
         chat_id: Optional chat ID to include
-        status: Processing status (pending, success, failed)
+        include_status: If True, include status field (for output, not input)
 
     Returns:
         JSON line string
@@ -25,13 +25,26 @@ def format_message(message: Any, chat_id: Optional[int] = None, status: str = "p
             'text': message.get('text') or '',
             'sender_id': message.get('from', {}).get('id'),
             'chat_id': chat_id or message.get('chat', {}).get('id'),
-            'status': status,
         }
         # Convert Unix timestamp to ISO
         if message.get('date'):
             data['date'] = datetime.utcfromtimestamp(message['date']).isoformat()
         else:
             data['date'] = None
+        # Optional fields
+        if message.get('forward_from'):
+            data['is_forwarded'] = True
+            data['forward_from_id'] = message.get('forward_from', {}).get('id')
+        if message.get('photo') or message.get('video') or message.get('document') or message.get('audio'):
+            data['has_media'] = True
+            if message.get('photo'):
+                data['media_type'] = 'photo'
+            elif message.get('video'):
+                data['media_type'] = 'video'
+            elif message.get('audio'):
+                data['media_type'] = 'audio'
+            else:
+                data['media_type'] = 'document'
     else:
         # Telethon Message format
         data = {
@@ -40,7 +53,6 @@ def format_message(message: Any, chat_id: Optional[int] = None, status: str = "p
             'sender_id': message.sender_id,
             'date': message.date.isoformat() if message.date else None,
             'chat_id': chat_id or (message.chat_id if hasattr(message, 'chat_id') else None),
-            'status': status,
         }
 
         # Add optional fields for Telethon format
@@ -58,6 +70,10 @@ def format_message(message: Any, chat_id: Optional[int] = None, status: str = "p
                 {'emoji': r.reaction.emoticon, 'count': r.count}
                 for r in message.reactions.results
             ]
+
+    # Only include status for output format (not input to processor)
+    if include_status:
+        data['status'] = 'pending'
 
     return json.dumps(data, ensure_ascii=False)
 

@@ -120,11 +120,10 @@ def process(ctx: click.Context, result, **kwargs) -> None:
         # Bot mode - daemon loop
         if not ctx.obj.get('exec_cmd'):
             raise click.UsageError("--bot mode requires --exec <command>")
-        if not ctx.obj.get('chat_name'):
-            raise click.UsageError("--bot mode requires --chat <chat_id>")
+        # --chat is optional in bot mode (process all chats if not specified)
         asyncio.run(run_bot_mode(
             config=ctx.obj['config'],
-            chat_name=ctx.obj['chat_name'],
+            chat_name=ctx.obj.get('chat_name'),  # Optional
             filter_expr=ctx.obj.get('filter_expr'),
             reaction=ctx.obj['reaction'],
             failed_mark=ctx.obj['failed_mark'],
@@ -153,7 +152,7 @@ def process(ctx: click.Context, result, **kwargs) -> None:
 
 async def run_bot_mode(
     config,
-    chat_name: str,
+    chat_name: Optional[str],
     filter_expr: Optional[str],
     reaction: str,
     failed_mark: str,
@@ -165,7 +164,7 @@ async def run_bot_mode(
 
     Args:
         config: Configuration
-        chat_name: Chat ID (must be numeric for bot mode)
+        chat_name: Optional chat ID filter (if None, process all chats)
         filter_expr: Optional DSL filter expression
         reaction: Success reaction emoji
         failed_mark: Failure reaction emoji
@@ -176,11 +175,13 @@ async def run_bot_mode(
     if not config.telegram.bot_token:
         raise click.ClickException("TELEGRAM_BOT_TOKEN required for bot mode")
 
-    # Parse chat ID (must be numeric)
-    try:
-        chat_id = int(chat_name.lstrip('@'))
-    except ValueError:
-        raise click.ClickException("Chat must be numeric ID in bot mode")
+    # Parse chat ID if specified (optional filter)
+    chat_filter = None
+    if chat_name:
+        try:
+            chat_filter = int(chat_name.lstrip('@'))
+        except ValueError:
+            raise click.ClickException("Chat must be numeric ID in bot mode")
 
     client = BotClient(config.telegram.bot_token)
     state_mgr = BotStateManager()
@@ -196,13 +197,18 @@ async def run_bot_mode(
             # Mark messages based on status
             for result in results:
                 msg_id = result.get('id')
+                result_chat_id = result.get('chat_id')  # Use chat_id from output
                 status = result.get('status', 'success')
+
+                if not result_chat_id:
+                    print(f"Skipping message {msg_id}: no chat_id in output", file=sys.stderr)
+                    continue
 
                 emoji = reaction if status == 'success' else failed_mark
                 try:
-                    await client.add_reaction(chat_id, msg_id, emoji)
+                    await client.add_reaction(result_chat_id, msg_id, emoji)
                 except Exception as e:
-                    print(f"Failed to mark message {msg_id}: {e}", file=sys.stderr)
+                    print(f"Failed to mark message {msg_id} in chat {result_chat_id}: {e}", file=sys.stderr)
 
             # Update offset on success
             if results:
@@ -215,15 +221,19 @@ async def run_bot_mode(
 
     batcher.on_batch = process_batch
 
-    # Load last offset
-    state = state_mgr.load(chat_id)
+    # Load last offset (use 0 if no chat filter, meaning process all)
+    state_key = chat_filter if chat_filter else 0
+    state = state_mgr.load(state_key)
     offset = state.get('last_update_id', 0)
 
     # Track update_ids for state updates
     pending_updates: dict = {}
 
     try:
-        print(f"Bot mode started, monitoring chat {chat_id}...", file=sys.stderr)
+        if chat_filter:
+            print(f"Bot mode started, monitoring chat {chat_filter}...", file=sys.stderr)
+        else:
+            print("Bot mode started, monitoring all chats...", file=sys.stderr)
         while True:
             updates = await client.poll_updates(offset=offset + 1)
 
@@ -236,16 +246,16 @@ async def run_bot_mode(
                 if not message:
                     continue
 
-                # Filter chat
+                # Filter chat if specified
                 msg_chat_id = message.get('chat', {}).get('id')
-                if msg_chat_id != chat_id:
+                if chat_filter and msg_chat_id != chat_filter:
                     continue
 
                 # Apply filter
                 if msg_filter and not msg_filter.matches(message):
                     continue
 
-                # Format message
+                # Format message (no status in input)
                 formatted = format_message(message)
                 pending_updates[message.get('message_id')] = update_id
 
@@ -254,7 +264,7 @@ async def run_bot_mode(
                 await batcher.add(json.loads(formatted))
 
                 # Save state after each update
-                state_mgr.save(chat_id, update_id)
+                state_mgr.save(state_key, update_id)
 
     except KeyboardInterrupt:
         print("\nShutting down...", file=sys.stderr)

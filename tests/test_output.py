@@ -164,21 +164,21 @@ class TestParseMessageId:
 class TestStatusField:
     """Test cases for status field in output."""
 
-    def test_format_message_includes_status(self):
-        """Output should include status field with default 'pending'."""
+    def test_format_message_no_status_by_default(self):
+        """Input format should NOT include status field by default."""
         msg = MockMessage()
         output = format_message(msg)
         data = json.loads(output)
 
-        assert data["status"] == "pending"
+        assert "status" not in data
 
-    def test_format_message_with_custom_status(self):
-        """Output should support custom status values."""
+    def test_format_message_with_include_status(self):
+        """Output format should include status when include_status=True."""
         msg = MockMessage()
-        output = format_message(msg, status="success")
+        output = format_message(msg, include_status=True)
         data = json.loads(output)
 
-        assert data["status"] == "success"
+        assert data["status"] == "pending"
 
 
 class TestBotApiFormat:
@@ -201,10 +201,10 @@ class TestBotApiFormat:
         assert data["text"] == "hello from bot"
         assert data["sender_id"] == 456
         assert data["chat_id"] == 789
-        assert data["status"] == "pending"
+        assert "status" not in data  # No status in input format
 
-    def test_format_message_bot_api_with_custom_status(self):
-        """format_message should support custom status for Bot API messages."""
+    def test_format_message_bot_api_with_include_status(self):
+        """format_message should support include_status for Bot API messages."""
         bot_message = {
             "message_id": 456,
             "text": "test",
@@ -213,7 +213,7 @@ class TestBotApiFormat:
             "chat": {"id": 789}
         }
 
-        output = format_message(bot_message, status="success")
+        output = format_message(bot_message, include_status=True)
         data = json.loads(output)
 
-        assert data["status"] == "success"
+        assert data["status"] == "pending"
