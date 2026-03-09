@@ -3,56 +3,72 @@
 import asyncio
 import json
 import sys
-from typing import Optional
+from typing import Optional, List
 
 import click
 
 from .client import TeleClient
 from .config import load_config
 from .filter import create_filter, MessageFilter
-from .state import StateManager
+from .state import StateManager, BotStateManager
 from .output import format_message, parse_message_id
+from .bot_client import BotClient
+from .batcher import MessageBatcher
+from .executor import run_exec_command
 
 
 @click.group(invoke_without_command=True)
+@click.option('--bot', 'bot_mode', is_flag=True, help='Use Bot API mode (daemon)')
 @click.option('--chat', '-c', 'chat_name', help='Chat name or ID')
-@click.option('--search', '-s', help='Search query')
+@click.option('--search', '-s', help='Search query (app mode only)')
 @click.option('--filter', '-f', 'filter_expr', help='DSL filter expression')
 @click.option('--full', is_flag=True, help='Full processing (ignore incremental state)')
 @click.option('--mark', is_flag=True, help='Mark mode (read message IDs from stdin)')
 @click.option('--reaction', '-r', default='✅', help='Reaction emoji for marking (default: ✅)')
+@click.option('--failed-mark', default='❌', help='Failed reaction emoji (bot mode)')
 @click.option('--config', 'config_path', help='Path to config file')
 @click.option('--batch-size', '-b', default=100, help='Batch size for fetching messages')
 @click.option('--limit', '-l', type=int, help='Maximum number of messages to fetch')
+@click.option('--page-size', default=10, help='Messages per batch (bot mode)')
+@click.option('--interval', default=3.0, help='Debounce interval in seconds (bot mode)')
+@click.option('--exec', 'exec_cmd', help='Command to process messages (bot mode)')
 @click.pass_context
 def cli(
     ctx: click.Context,
+    bot_mode: bool,
     chat_name: Optional[str],
     search: Optional[str],
     filter_expr: Optional[str],
     full: bool,
     mark: bool,
     reaction: str,
+    failed_mark: str,
     config_path: Optional[str],
     batch_size: int,
     limit: Optional[int],
+    page_size: int,
+    interval: float,
+    exec_cmd: Optional[str],
 ) -> None:
     """Telegram message processing pipeline tool.
 
     Examples:
-        # Get new messages from a chat
+        # App mode - Get new messages from a chat
         tele --chat "chat_name"
 
-        # Search messages
+        # App mode - Search messages
         tele --chat "chat_name" --search "keywords"
 
-        # Filter messages
+        # App mode - Filter messages
         tele --chat "chat_name" --filter 'contains("test") && !has_reaction("✅")'
 
-        # Mark messages (read from stdin)
+        # App mode - Mark messages (read from stdin)
         tele --mark --reaction "✅"
 
-        # Pipeline
+        # Bot mode - Daemon with processor
+        tele --bot --chat 12345 --exec "my-processor"
+
+        # Pipeline (app mode)
         tele --chat "chat_name" --filter 'contains("important")' | process-message | tele --mark
     """
     ctx.ensure_object(dict)
@@ -60,6 +76,18 @@ def cli(
     # Load config
     config = load_config(config_path)
     ctx.obj['config'] = config
+
+    # Bot mode
+    if bot_mode:
+        ctx.obj['bot_mode'] = True
+        ctx.obj['chat_name'] = chat_name
+        ctx.obj['filter_expr'] = filter_expr
+        ctx.obj['reaction'] = reaction
+        ctx.obj['failed_mark'] = failed_mark
+        ctx.obj['page_size'] = page_size
+        ctx.obj['interval'] = interval
+        ctx.obj['exec_cmd'] = exec_cmd
+        return
 
     # Apply defaults
     if chat_name is None:
@@ -88,7 +116,23 @@ def cli(
 @click.pass_context
 def process(ctx: click.Context, result, **kwargs) -> None:
     """Process the command."""
-    if ctx.obj.get('mark'):
+    if ctx.obj.get('bot_mode'):
+        # Bot mode - daemon loop
+        if not ctx.obj.get('exec_cmd'):
+            raise click.UsageError("--bot mode requires --exec <command>")
+        if not ctx.obj.get('chat_name'):
+            raise click.UsageError("--bot mode requires --chat <chat_id>")
+        asyncio.run(run_bot_mode(
+            config=ctx.obj['config'],
+            chat_name=ctx.obj['chat_name'],
+            filter_expr=ctx.obj.get('filter_expr'),
+            reaction=ctx.obj['reaction'],
+            failed_mark=ctx.obj['failed_mark'],
+            page_size=ctx.obj['page_size'],
+            interval=ctx.obj['interval'],
+            exec_cmd=ctx.obj['exec_cmd'],
+        ))
+    elif ctx.obj.get('mark'):
         # Mark mode
         asyncio.run(run_mark_mode(
             config=ctx.obj['config'],
@@ -105,6 +149,118 @@ def process(ctx: click.Context, result, **kwargs) -> None:
             batch_size=ctx.obj.get('batch_size', 100),
             limit=ctx.obj.get('limit'),
         ))
+
+
+async def run_bot_mode(
+    config,
+    chat_name: str,
+    filter_expr: Optional[str],
+    reaction: str,
+    failed_mark: str,
+    page_size: int,
+    interval: float,
+    exec_cmd: str,
+) -> None:
+    """Run bot mode daemon loop.
+
+    Args:
+        config: Configuration
+        chat_name: Chat ID (must be numeric for bot mode)
+        filter_expr: Optional DSL filter expression
+        reaction: Success reaction emoji
+        failed_mark: Failure reaction emoji
+        page_size: Messages per batch
+        interval: Debounce interval
+        exec_cmd: Command to process messages
+    """
+    if not config.telegram.bot_token:
+        raise click.ClickException("TELEGRAM_BOT_TOKEN required for bot mode")
+
+    # Parse chat ID (must be numeric)
+    try:
+        chat_id = int(chat_name.lstrip('@'))
+    except ValueError:
+        raise click.ClickException("Chat must be numeric ID in bot mode")
+
+    client = BotClient(config.telegram.bot_token)
+    state_mgr = BotStateManager()
+    msg_filter = create_filter(filter_expr) if filter_expr else None
+
+    batcher = MessageBatcher(page_size=page_size, interval=interval)
+
+    async def process_batch(messages: List[dict]) -> None:
+        """Process a batch of messages through exec command."""
+        try:
+            results = await run_exec_command(exec_cmd, messages, shell=True)
+
+            # Mark messages based on status
+            for result in results:
+                msg_id = result.get('id')
+                status = result.get('status', 'success')
+
+                emoji = reaction if status == 'success' else failed_mark
+                try:
+                    await client.add_reaction(chat_id, msg_id, emoji)
+                except Exception as e:
+                    print(f"Failed to mark message {msg_id}: {e}", file=sys.stderr)
+
+            # Update offset on success
+            if results:
+                # Get max update_id from the original updates
+                # Note: We need to track update_id separately
+                pass
+
+        except Exception as e:
+            print(f"Batch processing failed: {e}", file=sys.stderr)
+
+    batcher.on_batch = process_batch
+
+    # Load last offset
+    state = state_mgr.load(chat_id)
+    offset = state.get('last_update_id', 0)
+
+    # Track update_ids for state updates
+    pending_updates: dict = {}
+
+    try:
+        print(f"Bot mode started, monitoring chat {chat_id}...", file=sys.stderr)
+        while True:
+            updates = await client.poll_updates(offset=offset + 1)
+
+            for update in updates:
+                update_id = update.get('update_id')
+                offset = update_id
+
+                # Extract message from update
+                message = update.get('message') or update.get('channel_post')
+                if not message:
+                    continue
+
+                # Filter chat
+                msg_chat_id = message.get('chat', {}).get('id')
+                if msg_chat_id != chat_id:
+                    continue
+
+                # Apply filter
+                if msg_filter and not msg_filter.matches(message):
+                    continue
+
+                # Format message
+                formatted = format_message(message)
+                pending_updates[message.get('message_id')] = update_id
+
+                # Add to batcher
+                import json
+                await batcher.add(json.loads(formatted))
+
+                # Save state after each update
+                state_mgr.save(chat_id, update_id)
+
+    except KeyboardInterrupt:
+        print("\nShutting down...", file=sys.stderr)
+        await batcher.flush_remaining()
+    finally:
+        await client.close()
 
 
 async def run_get_messages(

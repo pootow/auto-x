@@ -153,3 +153,62 @@ class TestMarkMode:
 
         assert msg_id == 100
         assert chat_id == 123456
+
+
+class TestBotMode:
+    """Test bot mode pipeline."""
+
+    def test_cli_bot_mode_requires_exec(self):
+        """Bot mode should require --exec."""
+        result = subprocess.run(
+            ["uv", "run", "tele", "--bot", "--chat", "12345"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "exec" in result.stderr.lower() or "required" in result.stderr.lower()
+
+    def test_cli_bot_mode_requires_chat(self):
+        """Bot mode should require --chat."""
+        result = subprocess.run(
+            ["uv", "run", "tele", "--bot", "--exec", "cat"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+
+    def test_bot_state_management(self, tmp_path):
+        """Test bot state management."""
+        from tele.state import BotStateManager
+
+        manager = BotStateManager(str(tmp_path))
+
+        # Initial state
+        state = manager.load(123456)
+        assert state["last_update_id"] == 0
+
+        # After processing
+        manager.save(123456, 100)
+        state = manager.load(123456)
+        assert state["last_update_id"] == 100
+
+    def test_bot_message_format(self):
+        """Test Bot API message formatting."""
+        from tele.output import format_message
+
+        bot_message = {
+            "message_id": 123,
+            "text": "hello from bot",
+            "from": {"id": 456},
+            "date": 1705312800,
+            "chat": {"id": 789}
+        }
+
+        output = format_message(bot_message)
+        data = json.loads(output)
+
+        assert data["id"] == 123
+        assert data["text"] == "hello from bot"
+        assert data["sender_id"] == 456
+        assert data["chat_id"] == 789
+        assert data["status"] == "pending"
