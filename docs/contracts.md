@@ -87,28 +87,45 @@ args     = expr (',' expr)*
 }
 ```
 
-## Output Format
+## Message Output Format
+
+**Input to processor (JSON Lines):**
 
 ```typescript
-interface OutputMessage {
-  id: number;
-  text: string;
-  sender_id: number;
-  date: string | null;  // ISO
-  chat_id: number | null;
-  status: "success" | "failed" | "pending";  // Processing result
+interface MessageInput {
+  // Required - for marking/reactions
+  id: number;              // Message ID
+  chat_id: number;         // Chat/channel ID (required for API calls)
+
+  // Core fields
+  text: string | null;
+  sender_id: number | null;
+  date: string | null;     // ISO 8601
+
+  // Optional - when present
   is_forwarded?: boolean;
-  forward_from_id?: number;
+  forward_from_id?: number | null;
   has_media?: boolean;
-  media_type?: string;
+  media_type?: string | null;  // "photo", "video", "document", "audio", etc.
   reactions?: Array<{emoji: string, count: number}>;
 }
 ```
 
-**Status Field**:
-- `pending`: Message not yet processed (input to processor)
-- `success`: Processor marked as successful → apply `--mark` reaction
-- `failed`: Processor marked as failed → apply `--failed-mark` reaction
+**Output from processor (JSON Lines):**
+
+```typescript
+interface MessageOutput {
+  id: number;              // Required - which message to mark
+  chat_id: number;         // Required - which chat (needed for API)
+  status: "success" | "failed";  // Required - how to mark
+}
+```
+
+**Processor contract:**
+- Read JSON Lines from stdin (one message per line)
+- Write JSON Lines to stdout (one result per line)
+- Each output must include `id`, `chat_id`, and `status`
+- Exit 0 on success, non-zero to trigger retry
 
 ## Config Schema
 

@@ -123,20 +123,73 @@ Set privacy mode via @BotFather: `/setprivacy`
 
 ### The exec command
 
-Your processor receives JSON Lines on stdin and should output JSON Lines on stdout:
+Your processor receives JSON Lines on stdin and should output JSON Lines on stdout.
 
-**Input format:**
+#### Input format (what your processor receives)
+
 ```json
-{"id": 123, "text": "process me", "status": "pending", ...}
+{"id": 123, "chat_id": -1001234567890, "text": "Hello world", "sender_id": 456, "date": "2024-01-15T10:00:00Z"}
 ```
 
-**Output format:**
+**Required fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | number | Message ID (for marking) |
+| `chat_id` | number | Chat/channel ID (for marking) |
+| `text` | string/null | Message text content |
+| `sender_id` | number/null | Sender's user ID |
+| `date` | string/null | ISO 8601 timestamp |
+
+**Optional fields (when present):**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `is_forwarded` | boolean | Message is forwarded |
+| `forward_from_id` | number/null | Original sender ID |
+| `has_media` | boolean | Message has media attachment |
+| `media_type` | string/null | Type: "photo", "video", "document", "audio", etc. |
+| `reactions` | array | Existing reactions: `[{emoji, count}]` |
+
+#### Output format (what your processor must return)
+
 ```json
-{"id": 123, "status": "success"}
-{"id": 124, "status": "failed"}
+{"id": 123, "chat_id": -1001234567890, "status": "success"}
 ```
 
-The `status` field must be `"success"` or `"failed"`.
+**Required fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | number | Message ID being marked |
+| `chat_id` | number | Chat ID (required for API) |
+| `status` | string | `"success"` or `"failed"` |
+
+#### Example processor (Python)
+
+```python
+#!/usr/bin/env python3
+import sys
+import json
+
+for line in sys.stdin:
+    msg = json.loads(line)
+
+    # Your processing logic here
+    text = msg.get("text", "")
+    chat_id = msg["chat_id"]
+    msg_id = msg["id"]
+
+    # Determine result
+    status = "success"  # or "failed"
+
+    # Output result
+    print(json.dumps({
+        "id": msg_id,
+        "chat_id": chat_id,
+        "status": status
+    }))
+```
 
 ### Bot Mode Options
 

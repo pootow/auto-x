@@ -52,8 +52,8 @@ git commit -m "chore: add aiohttp for Bot API support"
 ```python
 # tests/test_output.py - add to existing file
 
-def test_format_message_includes_status():
-    """Output should include status field with default 'pending'."""
+def test_format_message_for_processor_input():
+    """Output should NOT include status field (processor adds it)."""
     from tele.output import format_message
     from unittest.mock import MagicMock
 
@@ -68,40 +68,99 @@ def test_format_message_includes_status():
     msg.reactions = None
 
     result = format_message(msg)
+    # Input format has no status field
+    assert "status" not in result
+    assert result["id"] == 123
+    assert result["chat_id"] == 789
+
+def test_format_message_with_status():
+    """format_message can optionally include status for output."""
+    from tele.output import format_message
+    from unittest.mock import MagicMock
+
+    msg = MagicMock()
+    msg.id = 123
+    msg.text = "test"
+    msg.sender_id = 456
+    msg.date = None
+    msg.chat_id = 789
+    msg.forward = None
+    msg.media = None
+    msg.reactions = None
+
+    # Status only in output, not input
+    result = format_message(msg, for_output=True)
     assert result["status"] == "pending"
 ```
 
 **Step 2: Run test to verify it fails**
 
-Run: `uv run pytest tests/test_output.py::test_format_message_includes_status -v`
+Run: `uv run pytest tests/test_output.py::test_format_message_for_processor_input -v`
 
-Expected: FAIL with "KeyError: 'status'"
+Expected: FAIL
 
-**Step 3: Modify format_message to include status**
+**Step 3: Modify format_message**
 
 ```python
 # tele/output.py - modify format_message function
 
-def format_message(message, status: str = "pending") -> dict:
+def format_message(message, for_output: bool = False) -> dict:
     """Format a message for JSON output.
 
     Args:
         message: Telethon Message or Bot API message dict
-        status: Processing status (pending, success, failed)
+        for_output: If True, include status field for marking
 
     Returns:
         dict suitable for JSON serialization
     """
-    # ... existing field extraction ...
+    if isinstance(message, dict):
+        # Bot API format
+        data = {
+            "id": message.get("message_id"),
+            "text": message.get("text"),
+            "sender_id": message.get("from", {}).get("id"),
+            "chat_id": message.get("chat", {}).get("id"),
+        }
+        # Convert Unix timestamp to ISO
+        if message.get("date"):
+            data["date"] = datetime.utcfromtimestamp(message["date"]).isoformat()
+        else:
+            data["date"] = None
+        # Optional fields
+        if message.get("forward_from"):
+            data["is_forwarded"] = True
+            data["forward_from_id"] = message["forward_from"].get("id")
+        if message.get("photo") or message.get("video") or message.get("document"):
+            data["has_media"] = True
+            # Determine media type
+            if message.get("photo"):
+                data["media_type"] = "photo"
+            elif message.get("video"):
+                data["media_type"] = "video"
+            elif message.get("document"):
+                data["media_type"] = "document"
+    else:
+        # Telethon Message format (existing logic)
+        data = {
+            "id": message.id,
+            "text": message.text,
+            "sender_id": message.sender_id,
+            "date": message.date.isoformat() if message.date else None,
+            "chat_id": message.chat_id,
+        }
+        # ... existing optional field extraction ...
 
-    data["status"] = status
+    # Only add status for output format
+    if for_output:
+        data["status"] = "pending"
 
     return data
 ```
 
 **Step 4: Run test to verify it passes**
 
-Run: `uv run pytest tests/test_output.py::test_format_message_includes_status -v`
+Run: `uv run pytest tests/test_output.py::test_format_message_for_processor_input tests/test_output.py::test_format_message_with_status -v`
 
 Expected: PASS
 
@@ -109,7 +168,7 @@ Expected: PASS
 
 ```bash
 git add tele/output.py tests/test_output.py
-git commit -m "feat(output): add status field to output format"
+git commit -m "feat(output): separate input/output formats, status only in output"
 ```
 
 ---
@@ -716,8 +775,8 @@ from tele.executor import run_exec_command
 async def test_exec_command_processes_messages():
     """run_exec_command should pipe messages to command and parse output."""
     messages = [
-        {"id": 1, "text": "hello", "status": "pending"},
-        {"id": 2, "text": "world", "status": "pending"},
+        {"id": 1, "chat_id": 123, "text": "hello"},
+        {"id": 2, "chat_id": 123, "text": "world"},
     ]
 
     # Use cat as echo to pass through (simulates identity processor)
@@ -725,22 +784,22 @@ async def test_exec_command_processes_messages():
 
     assert len(result) == 2
     assert result[0]["id"] == 1
+    assert result[0]["chat_id"] == 123
 
 @pytest.mark.asyncio
 async def test_exec_command_parses_status():
     """run_exec_command should parse status field from output."""
-    import json
+    messages = [{"id": 1, "chat_id": 123, "text": "test"}]
 
-    messages = [{"id": 1, "text": "test", "status": "pending"}]
-
-    # Use echo to output a modified message
+    # Processor must output id, chat_id, and status
     result = await run_exec_command(
-        "echo '{\"id\": 1, \"status\": \"success\"}'",
+        "echo '{\"id\": 1, \"chat_id\": 123, \"status\": \"success\"}'",
         messages,
         shell=True
     )
 
     assert result[0]["status"] == "success"
+    assert result[0]["chat_id"] == 123
 ```
 
 **Step 2: Run test to verify it fails**
@@ -770,16 +829,16 @@ async def run_exec_command(
 
     Args:
         command: Command to execute
-        messages: List of message dicts to send as JSON Lines
+        messages: List of message dicts to send as JSON Lines (no status field)
         shell: Use shell execution
 
     Returns:
-        List of message dicts from stdout (with status field)
+        List of result dicts from stdout with id, chat_id, status
 
     Raises:
         RuntimeError: If command fails
     """
-    # Prepare stdin as JSON Lines
+    # Prepare stdin as JSON Lines (no status in input)
     stdin_data = "\n".join(json.dumps(msg) for msg in messages)
 
     # Execute command
@@ -804,11 +863,15 @@ async def run_exec_command(
         raise RuntimeError(f"Command failed ({proc.returncode}): {stderr.decode()}")
 
     # Parse stdout as JSON Lines
+    # Output must include id, chat_id, status
     results = []
     for line in stdout.decode().strip().split("\n"):
         if line:
             try:
-                results.append(json.loads(line))
+                result = json.loads(line)
+                # Validate required fields
+                if "id" in result and "chat_id" in result and "status" in result:
+                    results.append(result)
             except json.JSONDecodeError:
                 pass  # Skip invalid lines
 
@@ -1107,11 +1170,11 @@ async def test_bot_mode_end_to_end():
     batcher = MessageBatcher(page_size=2, interval=0.1)
     batcher.on_batch = capture_batch
 
-    # Simulate messages
+    # Simulate Bot API messages (no status field in input)
     msg1 = {"message_id": 1, "text": "hello", "from": {"id": 123}, "chat": {"id": 456}, "date": 1705312800}
     msg2 = {"message_id": 2, "text": "world", "from": {"id": 123}, "chat": {"id": 456}, "date": 1705312800}
 
-    formatted1 = format_message(msg1)
+    formatted1 = format_message(msg1)  # No status in input
     formatted2 = format_message(msg2)
 
     await batcher.add(formatted1)
@@ -1121,7 +1184,10 @@ async def test_bot_mode_end_to_end():
 
     assert len(batch_results) == 1
     assert len(batch_results[0]) == 2
-    assert batch_results[0][0]["status"] == "pending"
+    # Input format has no status
+    assert "status" not in batch_results[0][0]
+    assert batch_results[0][0]["id"] == 1
+    assert batch_results[0][0]["chat_id"] == 456
 ```
 
 **Step 2: Run test**
