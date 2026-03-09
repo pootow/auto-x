@@ -13,6 +13,7 @@ class TelegramConfig:
     """Telegram API configuration."""
     api_id: Optional[int] = None
     api_hash: Optional[str] = None
+    bot_token: Optional[str] = None
     session_name: str = "tele_tool"
 
 
@@ -124,6 +125,10 @@ class ConfigManager:
         api_hash = os.environ.get('TELEGRAM_API_HASH')
         if api_hash:
             config.telegram.api_hash = api_hash
+
+        bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+        if bot_token:
+            config.telegram.bot_token = bot_token
 
         return config
 

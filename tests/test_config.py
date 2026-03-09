@@ -115,3 +115,13 @@ class TestConfigManager:
         loaded = manager.load()
         assert loaded.telegram.api_id == 12345
         assert loaded.telegram.api_hash == "your_api_hash_here"
+
+    def test_env_bot_token(self, temp_config_dir, monkeypatch):
+        """Test loading bot token from environment."""
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test_bot_token_123")
+
+        config_path = os.path.join(temp_config_dir, "config.yaml")
+        manager = ConfigManager(config_path)
+        config = manager.load()
+
+        assert config.telegram.bot_token == "test_bot_token_123"
