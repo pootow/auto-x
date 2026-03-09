@@ -146,7 +146,7 @@ defaults:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `--bot` | flag | False | Enable bot mode |
-| `--chat` | str | required | Target chat (bot must be admin) |
+| `--chat` | str | None | Filter to specific chat ID (optional) |
 | `--exec` | str | None | Command to process messages |
 | `--` | - | - | Pass remaining args to exec (avoids quoting) |
 | `--filter` | str | None | DSL filter (default: all messages) |

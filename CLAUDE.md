@@ -10,8 +10,8 @@ tele --chat "name" [--search "q"] [--filter 'DSL'] [--full]  # Get messages
 tele --mark [--reaction "✅"]                                # Mark from stdin
 
 # Bot mode (Bot API daemon)
-tele --bot --chat "name" --exec "processor" [--filter 'DSL'] [--page-size 10] [--interval 3]
-tele --bot --chat "name" -- <command args...>               # Alternative: -- to avoid quoting
+tele --bot --exec "processor" [--chat "id"] [--filter 'DSL'] [--page-size 10] [--interval 3]
+tele --bot -- <command args...>               # Alternative: -- to avoid quoting
 ```
 
 ## Docs

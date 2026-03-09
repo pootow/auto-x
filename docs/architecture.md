@@ -74,6 +74,12 @@ load_config() -> BotClient() -> poll_updates() -> filter() -> batch() -> exec() 
 
 **Offset Update Rule**: Only after successful exec + successful marking
 
+**What Bot Can See**:
+- Private DMs: all messages
+- Groups (privacy ON): @mentions and commands only
+- Groups (privacy OFF): all messages
+- Channels (admin required): all posts
+
 ### filter.py (DSL Engine)
 
 **Pipeline**: `Lexer -> Parser -> AST -> Evaluator`

@@ -131,9 +131,12 @@ Enter your phone number and verification code when prompted.
 
 ### "Bot not in chat" (Bot Mode)
 
-Make sure your bot is:
-1. Added to the channel/group
-2. Has admin permissions
+For reactions to work, the bot needs permission:
+- Private chat: Works by default
+- Group chat: Bot needs permission to add reactions
+- Channel: Bot must be admin
+
+If reactions fail, check bot permissions.
 
 ### "Could not resolve chat" (App Mode)
 

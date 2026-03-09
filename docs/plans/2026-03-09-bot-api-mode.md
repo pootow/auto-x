@@ -4,7 +4,7 @@
 
 **Goal:** Add Bot API mode for users without API_ID access, enabling daemon-style message processing via Bot API polling.
 
-**Architecture:** Create `BotClient` class for Bot API HTTP operations, modify CLI to support `--bot` flag with daemon mode, update `output.py` to include `status` field, refactor state management for offset-based tracking in bot mode.
+**Architecture:** Create `BotClient` class for Bot API HTTP operations, modify CLI to support `--bot` flag with daemon mode, update `output.py` to include `status` field, refactor state management for offset-based tracking in bot mode. `--chat` is optional in bot mode - processes all messages the bot can see (DMs, @mentions, group messages based on privacy mode).
 
 **Tech Stack:** aiohttp (Bot API HTTP), click (CLI), existing filter/output components
 
@@ -846,10 +846,10 @@ from click.testing import CliRunner
 from tele.cli import cli
 
 def test_cli_bot_mode_requires_exec():
-    """Bot mode should require --exec or -- separator."""
+    """Bot mode should require --exec."""
     runner = CliRunner()
 
-    result = runner.invoke(cli, ["--bot", "--chat", "test"])
+    result = runner.invoke(cli, ["--bot"])  # No --exec
 
     assert result.exit_code != 0
     assert "exec" in result.output.lower() or "required" in result.output.lower()
@@ -948,26 +948,20 @@ async def run_bot_mode(opts: dict):
         raise click.ClickException("TELEGRAM_BOT_TOKEN required for bot mode")
 
     client = BotClient(config.telegram.bot_token)
-    chat = opts["chat"]
-    if not chat:
-        raise click.ClickException("--chat required for bot mode")
-
-    # Resolve chat ID (bot must be admin)
-    # For simplicity, assume chat is numeric ID or @username
-    try:
-        chat_id = int(chat.lstrip("@"))
-    except ValueError:
-        raise click.ClickException("Chat must be numeric ID in bot mode")
+    chat_filter = opts.get("chat")  # Optional - if None, process all chats
 
     state_mgr = BotStateManager()
     msg_filter = MessageFilter(opts["filter_expr"]) if opts["filter_expr"] else None
 
     batcher = MessageBatcher(page_size=opts["page_size"], interval=opts["interval"])
     batcher.on_batch = lambda msgs: process_batch(
-        client, msgs, opts, chat_id, state_mgr, msg_filter
+        client, msgs, opts, state_mgr, msg_filter
     )
 
-    offset = state_mgr.load(chat_id).get("last_update_id", 0)
+    # Get offset from state (use 0 if no state, meaning process all chats)
+    # If chat_filter is set, use chat-specific state file
+    state_key = int(chat_filter) if chat_filter else 0
+    offset = state_mgr.load(state_key).get("last_update_id", 0)
 
     try:
         while True:
@@ -981,8 +975,9 @@ async def run_bot_mode(opts: dict):
                 if not message:
                     continue
 
-                # Filter chat
-                if message.get("chat", {}).get("id") != chat_id:
+                # Filter by chat if specified
+                chat_id = message.get("chat", {}).get("id")
+                if chat_filter and chat_id != int(chat_filter):
                     continue
 
                 # Apply filter
@@ -991,6 +986,7 @@ async def run_bot_mode(opts: dict):
 
                 # Add to batcher
                 formatted = format_message(message)
+                formatted["_chat_id"] = chat_id  # Store for marking
                 await batcher.add(formatted)
 
     except KeyboardInterrupt:
@@ -999,7 +995,7 @@ async def run_bot_mode(opts: dict):
         await client.close()
 
 
-async def process_batch(client, messages, opts, chat_id, state_mgr, msg_filter):
+async def process_batch(client, messages, opts, state_mgr, msg_filter):
     """Process a batch of messages through exec command."""
     exec_cmd = opts["exec_cmd"]
 
@@ -1009,6 +1005,7 @@ async def process_batch(client, messages, opts, chat_id, state_mgr, msg_filter):
         # Mark messages based on status
         for result in results:
             msg_id = result.get("id")
+            chat_id = result.get("_chat_id") or result.get("chat_id")
             status = result.get("status", "success")
 
             emoji = opts["mark"] if status == "success" else opts["failed_mark"]
@@ -1020,7 +1017,9 @@ async def process_batch(client, messages, opts, chat_id, state_mgr, msg_filter):
         # Update offset on success
         if results:
             last_id = max(m.get("id", 0) for m in messages)
-            state_mgr.save(chat_id, last_id)
+            chat_filter = opts.get("chat")
+            state_key = int(chat_filter) if chat_filter else 0
+            state_mgr.save(state_key, last_id)
 
     except Exception as e:
         print(f"Batch processing failed: {e}")

@@ -72,25 +72,32 @@ Use this if you only need to monitor specific channels/groups where you can add 
 2. Send `/newbot` and follow the instructions
 3. Copy the bot token (looks like `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
 
-#### 2. Add bot to your chat
-
-1. Add your bot to the channel/group
-2. Give it admin permissions (required to read messages and add reactions)
-
-#### 3. Configure
+#### 2. Configure
 
 ```bash
 export TELEGRAM_BOT_TOKEN=your_bot_token
 ```
 
-#### 4. Run
+#### 3. Run
 
 ```bash
-# Chat ID is required (use negative number for channels/groups)
+# Process all messages the bot can see
+uv run tele --bot --exec "your-processor"
+
+# Or filter to specific chat
 uv run tele --bot --chat "-1001234567890" --exec "your-processor"
 ```
 
-**Note:** Bot mode only sees messages sent AFTER the bot was added. No history access.
+**What messages can the bot see?**
+
+| Source | What the bot receives |
+|--------|----------------------|
+| Private chat (DMs) | All messages sent to the bot |
+| Group chat (privacy mode ON) | Only @mentions and commands (e.g., `/start`) |
+| Group chat (privacy mode OFF) | All messages |
+| Channel | Requires admin - all posts |
+
+Configure privacy mode via @BotFather → `/setprivacy`.
 
 ## Next Steps
 

@@ -43,8 +43,11 @@ Bot runs as foreground daemon, polls for new messages, batches them, pipes to pr
 6. Update offset only on success
 
 **Bot Mode Constraints**:
-- Bot must be admin in target chat/channel
-- Only sees messages after bot was added
+- Bot receives messages based on privacy mode:
+  - Private DMs: all messages
+  - Groups (privacy ON): @mentions and commands only
+  - Groups (privacy OFF): all messages
+  - Channels: requires admin, all posts
 - No search support (Bot API limitation)
 - At-least-once delivery (processor must be idempotent)
 

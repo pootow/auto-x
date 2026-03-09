@@ -94,8 +94,23 @@ Bot mode runs as a foreground daemon, polling for new messages and processing th
 ### Basic usage
 
 ```bash
+# Process all messages the bot can see
+uv run tele --bot --exec "my-processor"
+
+# Filter to specific chat (optional)
 uv run tele --bot --chat "-1001234567890" --exec "my-processor"
 ```
+
+### What the bot can see
+
+| Source | Messages received |
+|--------|------------------|
+| Private DMs | All messages |
+| Group (privacy ON) | @mentions and commands only |
+| Group (privacy OFF) | All messages |
+| Channel (admin required) | All posts |
+
+Set privacy mode via @BotFather: `/setprivacy`
 
 ### How it works
 
@@ -128,7 +143,7 @@ The `status` field must be `"success"` or `"failed"`.
 | Option | Description |
 |--------|-------------|
 | `--bot` | Enable bot mode |
-| `--chat, -c` | Chat ID (required, numeric only) |
+| `--chat, -c` | Filter to specific chat ID (optional) |
 | `--exec` | Command to process messages (required) |
 | `--` | Pass remaining args to exec command |
 | `--filter, -f` | Filter expression (default: all messages) |
