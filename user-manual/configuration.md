@@ -14,19 +14,28 @@ uv run tele --config /path/to/config.yaml --chat "me"
 
 ```yaml
 telegram:
+  # App mode credentials
   api_id: 12345           # Your API ID
   api_hash: "abc123..."   # Your API hash
   session_name: "tele_tool"  # Session file name
 
+  # Bot mode credentials
+  bot_token: "123456:ABC..."  # Bot token from @BotFather
+
 defaults:
   chat: "work"            # Default chat (optional)
-  reaction: "✅"          # Default reaction for marking
-  batch_size: 100         # Messages per API call
+  reaction: "✅"          # Success reaction for marking
+  failed_reaction: "❌"   # Failure reaction (bot mode)
+  batch_size: 100         # Messages per API call (app mode)
+  page_size: 10           # Messages per batch (bot mode)
+  interval: 3             # Debounce seconds (bot mode)
 ```
 
 ## Environment variables
 
 Override config file values:
+
+### App Mode
 
 ```bash
 export TELEGRAM_API_ID=12345
@@ -35,11 +44,19 @@ export TELEGRAM_API_HASH="abc123..."
 uv run tele --chat "me"
 ```
 
+### Bot Mode
+
+```bash
+export TELEGRAM_BOT_TOKEN="123456:ABC..."
+
+uv run tele --bot --chat "-1001234567890" --exec "processor"
+```
+
 Environment variables take priority over the config file.
 
 ## Session files
 
-Location: `~/.tele/tele_tool.session`
+**App Mode:** `~/.tele/tele_tool.session`
 
 This stores your Telegram authentication. Keep it secure - anyone with this file can access your account.
 
@@ -54,6 +71,8 @@ telegram:
 
 ## State files
 
+### App Mode
+
 Location: `~/.tele/state/{chat_id}.json`
 
 Tracks incremental processing:
@@ -65,22 +84,42 @@ Tracks incremental processing:
 }
 ```
 
+### Bot Mode
+
+Location: `~/.tele/state/bot_{chat_id}.json`
+
+Tracks last processed update:
+
+```json
+{
+  "last_update_id": 456,
+  "last_processed_at": "2024-01-15T10:30:00Z"
+}
+```
+
 ### Reset state for a chat
 
 ```bash
-# Delete state file to reprocess all messages
+# App mode
 rm ~/.tele/state/CHAT_ID.json
+
+# Bot mode
+rm ~/.tele/state/bot_CHAT_ID.json
 ```
 
-Or use `--full` to ignore state temporarily.
+Or use `--full` to ignore state temporarily (app mode only).
 
 ## Troubleshooting
 
-### "API ID not found"
+### "API ID not found" (App Mode)
 
 Set credentials in config file or environment variables.
 
-### "Not authorized"
+### "BOT_TOKEN required" (Bot Mode)
+
+Set `TELEGRAM_BOT_TOKEN` or add to config file.
+
+### "Not authorized" (App Mode)
 
 Run interactively once to log in:
 
@@ -90,7 +129,13 @@ uv run tele --chat "me"
 
 Enter your phone number and verification code when prompted.
 
-### "Could not resolve chat"
+### "Bot not in chat" (Bot Mode)
+
+Make sure your bot is:
+1. Added to the channel/group
+2. Has admin permissions
+
+### "Could not resolve chat" (App Mode)
 
 The chat name doesn't match exactly. Try:
 
@@ -98,7 +143,7 @@ The chat name doesn't match exactly. Try:
 - Checking the exact name in Telegram
 - Using `@username` for public channels
 
-### Session errors
+### Session errors (App Mode)
 
 If authentication issues persist:
 
@@ -107,3 +152,7 @@ If authentication issues persist:
 rm ~/.tele/*.session
 uv run tele --chat "me"
 ```
+
+### Bot mode duplicates messages
+
+Bot mode guarantees at-least-once delivery. If processing fails, messages may be re-delivered. Your processor should be idempotent (handle same message multiple times safely).

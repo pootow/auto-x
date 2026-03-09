@@ -12,6 +12,8 @@ Command-line tool for automated Telegram message processing.
 
 ## Quick start
 
+### App Mode (full access)
+
 ```bash
 # Setup
 uv sync
@@ -31,8 +33,36 @@ uv run tele --chat "work" --filter 'contains("urgent")'
 uv run tele --chat "work" | your-script | uv run tele --mark
 ```
 
+### Bot Mode (easier setup)
+
+```bash
+# Setup - just get a bot token from @BotFather
+uv sync
+export TELEGRAM_BOT_TOKEN=your_bot_token
+
+# Run as daemon
+uv run tele --bot --chat "-100123456789" --exec "your-processor"
+```
+
 ## What you need
 
+**App Mode:**
 - Python 3.10+
 - Telegram account
 - API credentials from https://my.telegram.org/apps
+
+**Bot Mode:**
+- Python 3.10+
+- Bot token from @BotFather (talk to @BotFather on Telegram)
+- Bot must be admin in target chat/channel
+
+## Mode Comparison
+
+| Feature | App Mode | Bot Mode |
+|---------|----------|----------|
+| Setup | Requires API_ID | Just bot token |
+| Access | All your chats | Only where bot is admin |
+| History | Full history | Only after bot added |
+| Search | Yes | No |
+| Run style | One-shot commands | Daemon process |
+| Auth | Phone login | Token-based |

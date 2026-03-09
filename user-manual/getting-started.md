@@ -18,14 +18,20 @@ uv sync
 
 ## Setup
 
-### 1. Get Telegram API credentials
+Choose your mode:
+
+### App Mode (Full Access)
+
+Use this if you need access to all your chats and full message history.
+
+#### 1. Get Telegram API credentials
 
 1. Go to https://my.telegram.org/apps
 2. Log in with your phone number
 3. Create a new application
 4. Copy the `api_id` and `api_hash`
 
-### 2. Configure credentials
+#### 2. Configure credentials
 
 Create `~/.tele/config.yaml`:
 
@@ -42,7 +48,7 @@ export TELEGRAM_API_ID=your_id
 export TELEGRAM_API_HASH=your_hash
 ```
 
-### 3. First run (login)
+#### 3. First run (login)
 
 ```bash
 uv run tele --chat "me"
@@ -54,8 +60,41 @@ You'll be prompted to:
 
 This creates a session file at `~/.tele/tele_tool.session`.
 
+---
+
+### Bot Mode (Easier Setup)
+
+Use this if you only need to monitor specific channels/groups where you can add a bot.
+
+#### 1. Create a bot
+
+1. Open Telegram and search for @BotFather
+2. Send `/newbot` and follow the instructions
+3. Copy the bot token (looks like `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
+
+#### 2. Add bot to your chat
+
+1. Add your bot to the channel/group
+2. Give it admin permissions (required to read messages and add reactions)
+
+#### 3. Configure
+
+```bash
+export TELEGRAM_BOT_TOKEN=your_bot_token
+```
+
+#### 4. Run
+
+```bash
+# Chat ID is required (use negative number for channels/groups)
+uv run tele --bot --chat "-1001234567890" --exec "your-processor"
+```
+
+**Note:** Bot mode only sees messages sent AFTER the bot was added. No history access.
+
 ## Next Steps
 
 - [Basic Usage](basic-usage.md) - Common commands
 - [Filter Guide](filter-guide.md) - How to filter messages
 - [Examples](examples.md) - Real-world use cases
+- [Configuration](configuration.md) - All settings
