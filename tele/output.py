@@ -5,12 +5,13 @@ from datetime import datetime
 from typing import Any, Optional
 
 
-def format_message(message: Any, chat_id: Optional[int] = None) -> str:
+def format_message(message: Any, chat_id: Optional[int] = None, status: str = "pending") -> str:
     """Format a message as a JSON line.
 
     Args:
         message: Telethon Message object
         chat_id: Optional chat ID to include
+        status: Processing status (pending, success, failed)
 
     Returns:
         JSON line string
@@ -21,6 +22,7 @@ def format_message(message: Any, chat_id: Optional[int] = None) -> str:
         'sender_id': message.sender_id,
         'date': message.date.isoformat() if message.date else None,
         'chat_id': chat_id or (message.chat_id if hasattr(message, 'chat_id') else None),
+        'status': status,
     }
 
     # Add optional fields

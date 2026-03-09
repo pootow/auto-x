@@ -159,3 +159,23 @@ class TestParseMessageId:
 
         assert msg_id == 789
         assert chat_id == 123
+
+
+class TestStatusField:
+    """Test cases for status field in output."""
+
+    def test_format_message_includes_status(self):
+        """Output should include status field with default 'pending'."""
+        msg = MockMessage()
+        output = format_message(msg)
+        data = json.loads(output)
+
+        assert data["status"] == "pending"
+
+    def test_format_message_with_custom_status(self):
+        """Output should support custom status values."""
+        msg = MockMessage()
+        output = format_message(msg, status="success")
+        data = json.loads(output)
+
+        assert data["status"] == "success"
