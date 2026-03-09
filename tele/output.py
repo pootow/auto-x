@@ -8,38 +8,56 @@ from typing import Any, Optional
 def format_message(message: Any, chat_id: Optional[int] = None, status: str = "pending") -> str:
     """Format a message as a JSON line.
 
+    Handles both Telethon Message objects and Bot API message dicts.
+
     Args:
-        message: Telethon Message object
+        message: Telethon Message object or Bot API message dict
         chat_id: Optional chat ID to include
         status: Processing status (pending, success, failed)
 
     Returns:
         JSON line string
     """
-    data = {
-        'id': message.id,
-        'text': message.text or '',
-        'sender_id': message.sender_id,
-        'date': message.date.isoformat() if message.date else None,
-        'chat_id': chat_id or (message.chat_id if hasattr(message, 'chat_id') else None),
-        'status': status,
-    }
+    if isinstance(message, dict):
+        # Bot API format
+        data = {
+            'id': message.get('message_id'),
+            'text': message.get('text') or '',
+            'sender_id': message.get('from', {}).get('id'),
+            'chat_id': chat_id or message.get('chat', {}).get('id'),
+            'status': status,
+        }
+        # Convert Unix timestamp to ISO
+        if message.get('date'):
+            data['date'] = datetime.utcfromtimestamp(message['date']).isoformat()
+        else:
+            data['date'] = None
+    else:
+        # Telethon Message format
+        data = {
+            'id': message.id,
+            'text': message.text or '',
+            'sender_id': message.sender_id,
+            'date': message.date.isoformat() if message.date else None,
+            'chat_id': chat_id or (message.chat_id if hasattr(message, 'chat_id') else None),
+            'status': status,
+        }
 
-    # Add optional fields
-    if message.forward:
-        data['is_forwarded'] = True
-        if message.forward.from_id:
-            data['forward_from_id'] = message.forward.from_id
+        # Add optional fields for Telethon format
+        if message.forward:
+            data['is_forwarded'] = True
+            if message.forward.from_id:
+                data['forward_from_id'] = message.forward.from_id
 
-    if message.media:
-        data['has_media'] = True
-        data['media_type'] = type(message.media).__name__
+        if message.media:
+            data['has_media'] = True
+            data['media_type'] = type(message.media).__name__
 
-    if message.reactions:
-        data['reactions'] = [
-            {'emoji': r.reaction.emoticon, 'count': r.count}
-            for r in message.reactions.results
-        ]
+        if message.reactions:
+            data['reactions'] = [
+                {'emoji': r.reaction.emoticon, 'count': r.count}
+                for r in message.reactions.results
+            ]
 
     return json.dumps(data, ensure_ascii=False)
 

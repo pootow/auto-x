@@ -179,3 +179,41 @@ class TestStatusField:
         data = json.loads(output)
 
         assert data["status"] == "success"
+
+
+class TestBotApiFormat:
+    """Test cases for Bot API message format support."""
+
+    def test_format_message_from_bot_api(self):
+        """format_message should handle Bot API message dict."""
+        bot_message = {
+            "message_id": 123,
+            "text": "hello from bot",
+            "from": {"id": 456},
+            "date": 1705312800,  # Unix timestamp
+            "chat": {"id": 789}
+        }
+
+        output = format_message(bot_message)
+        data = json.loads(output)
+
+        assert data["id"] == 123
+        assert data["text"] == "hello from bot"
+        assert data["sender_id"] == 456
+        assert data["chat_id"] == 789
+        assert data["status"] == "pending"
+
+    def test_format_message_bot_api_with_custom_status(self):
+        """format_message should support custom status for Bot API messages."""
+        bot_message = {
+            "message_id": 456,
+            "text": "test",
+            "from": {"id": 123},
+            "date": 1705312800,
+            "chat": {"id": 789}
+        }
+
+        output = format_message(bot_message, status="success")
+        data = json.loads(output)
+
+        assert data["status"] == "success"
