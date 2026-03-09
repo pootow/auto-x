@@ -14,6 +14,16 @@ class Message:
     reactions: MessageReactions | None
 ```
 
+## Bot API Update Object
+
+```python
+class Update:
+    update_id: int
+    message: Message | None      # New message
+    channel_post: Message | None # Channel post
+    # ... other update types
+```
+
 ## Filter DSL
 
 ### Functions
@@ -38,7 +48,7 @@ class Message:
 | Operator | Operands | Result |
 |----------|----------|--------|
 | `&&` | bool, bool | Logical AND |
-| `\|\|` | bool, bool | Logical OR |
+| `||` | bool, bool | Logical OR |
 | `!` | bool | Logical NOT |
 | `==`, `!=` | any, any | Equality |
 | `<`, `<=`, `>`, `>=` | num, num | Comparison |
@@ -58,11 +68,22 @@ args     = expr (',' expr)*
 
 ## State File
 
+### App Mode
+
 ```json
 {
   "last_message_id": int,    // Max processed ID
   "last_processed_at": str,  // ISO timestamp
   "chat_id": int | null      // Optional reference
+}
+```
+
+### Bot Mode
+
+```json
+{
+  "last_update_id": int,     // Last processed update_id
+  "last_processed_at": str   // ISO timestamp
 }
 ```
 
@@ -75,6 +96,7 @@ interface OutputMessage {
   sender_id: number;
   date: string | null;  // ISO
   chat_id: number | null;
+  status: "success" | "failed" | "pending";  // Processing result
   is_forwarded?: boolean;
   forward_from_id?: number;
   has_media?: boolean;
@@ -83,19 +105,55 @@ interface OutputMessage {
 }
 ```
 
+**Status Field**:
+- `pending`: Message not yet processed (input to processor)
+- `success`: Processor marked as successful → apply `--mark` reaction
+- `failed`: Processor marked as failed → apply `--failed-mark` reaction
+
 ## Config Schema
 
 ```yaml
 telegram:
-  api_id: int | null      # Or TELEGRAM_API_ID
-  api_hash: str | null    # Or TELEGRAM_API_HASH
-  session_name: str       # Default: "tele_tool"
+  api_id: int | null        # Or TELEGRAM_API_ID (app mode)
+  api_hash: str | null      # Or TELEGRAM_API_HASH (app mode)
+  bot_token: str | null     # Or TELEGRAM_BOT_TOKEN (bot mode)
+  session_name: str         # Default: "tele_tool"
 
 defaults:
-  chat: str | null        # Default chat
-  reaction: str           # Default: "✅"
-  batch_size: int         # Default: 100
+  chat: str | null          # Default chat
+  reaction: str             # Default: "✅"
+  failed_reaction: str      # Default: "❌"
+  batch_size: int           # Default: 100
+  page_size: int            # Default: 10
+  interval: int             # Default: 3 (seconds, bot mode)
 ```
+
+## CLI Options
+
+### App Mode
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--chat` | str | config | Target chat |
+| `--search` | str | None | Search query |
+| `--filter` | str | None | DSL filter |
+| `--full` | flag | False | Ignore state |
+| `--page-size` | int | 10 | Messages per output batch |
+| `--mark` | str | ✅ | Reaction for marking |
+
+### Bot Mode
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--bot` | flag | False | Enable bot mode |
+| `--chat` | str | required | Target chat (bot must be admin) |
+| `--exec` | str | None | Command to process messages |
+| `--` | - | - | Pass remaining args to exec (avoids quoting) |
+| `--filter` | str | None | DSL filter (default: all messages) |
+| `--page-size` | int | 10 | Max messages per batch |
+| `--interval` | int | 3 | Debounce seconds |
+| `--mark` | str | ✅ | Success reaction |
+| `--failed-mark` | str | ❌ | Failure reaction |
 
 ## Extension Points
 
@@ -127,4 +185,4 @@ if message.my_field:
 
 1. Add option in `cli()` decorator
 2. Pass through `ctx.obj`
-3. Use in `run_get_messages()` or `run_mark_mode()`
+3. Use in `run_get_messages()` or `run_bot_mode()`

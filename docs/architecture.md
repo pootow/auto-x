@@ -2,14 +2,28 @@
 
 ## Data Flow
 
+### App Mode
+
 ```
-┌─────────┐    ┌────────┐    ┌────────┐    ┌─────────┐
-│ Config  │───>│ Client │───>│ Filter │───>│ Output  │
-└─────────┘    └────────┘    └────────┘    └─────────┘
-                    │
-               ┌────┴────┐
-               │  State  │
-               └─────────┘
+┌─────────┐    ┌────────────┐    ┌────────┐    ┌─────────┐
+│ Config  │───>│ TeleClient │───>│ Filter │───>│ Output  │
+└─────────┘    └────────────┘    └────────┘    └─────────┘
+                      │
+                 ┌────┴────┐
+                 │  State  │
+                 └─────────┘
+```
+
+### Bot Mode
+
+```
+┌─────────┐    ┌────────────┐    ┌────────┐    ┌─────────┐    ┌──────────┐
+│ Config  │───>│ BotClient  │───>│ Filter │───>│ Batcher │───>│ Executor │
+└─────────┘    └────────────┘    └────────┘    └─────────┘    └──────────┘
+                      │                                            │
+                 ┌────┴────┐                                      │
+                 │  State  │<─────────────────────────────────────┘
+                 └─────────┘     (update offset on success only)
 ```
 
 ## Components
@@ -18,18 +32,19 @@
 
 **Responsibility**: Parse args, orchestrate flow
 
+**Modes**:
+- `--bot`: Daemon mode with Bot API
+- Default: App mode with MTProto
+
 ```python
-# Key flow
+# App mode flow
 load_config() -> TeleClient() -> fetch_messages() -> filter() -> output()
-                                                    ↓
-                                              StateManager.update()
+
+# Bot mode flow
+load_config() -> BotClient() -> poll_updates() -> filter() -> batch() -> exec() -> mark()
 ```
 
-**CLI Modes**:
-- `get`: Fetch messages (default)
-- `mark`: Read JSON from stdin, add reactions
-
-### client.py (API Layer)
+### client.py (MTProto API Layer)
 
 **Responsibility**: Wrap Telethon, hide complexity
 
@@ -44,6 +59,20 @@ load_config() -> TeleClient() -> fetch_messages() -> filter() -> output()
 - User: positive int
 - Group: negative int
 - Channel: -1000000000000 - channel_id
+
+### bot_client.py (Bot API Layer)
+
+**Responsibility**: Bot API HTTP client, polling, message handling
+
+| Method | Purpose |
+|--------|---------|
+| `poll_updates()` | Long polling with offset |
+| `add_reaction()` | Mark via Bot API |
+| `get_chat_id()` | Extract chat from update |
+
+**State**: Offset-based, stored in `bot_{chat_id}.json`
+
+**Offset Update Rule**: Only after successful exec + successful marking
 
 ### filter.py (DSL Engine)
 
@@ -72,37 +101,49 @@ True/False
 
 ### state.py (Incremental Processing)
 
-**File**: `~/.tele/state/{chat_id}.json`
+**App Mode File**: `~/.tele/state/{chat_id}.json`
 
 ```json
 {"last_message_id": 123, "last_processed_at": "2024-01-15T10:00:00Z"}
 ```
 
+**Bot Mode File**: `~/.tele/state/bot_{chat_id}.json`
+
+```json
+{"last_update_id": 456, "last_processed_at": "2024-01-15T10:00:00Z"}
+```
+
 **Logic**:
-- Normal mode: `min_id = last_message_id`, `reverse=True`
-- Search mode: No incremental (API limitation)
-- `--full` flag: Ignore state
+- App mode: `min_id = last_message_id`, `reverse=True`
+- Bot mode: `offset = last_update_id + 1`
+- `--full` flag: Ignore state (app mode only)
 
 ### output.py (Serialization)
 
 **Format**: JSON Lines (one message per line)
 
 ```json
-{"id": 1, "text": "...", "sender_id": 123, "date": "...", "chat_id": 456}
+{"id": 1, "text": "...", "sender_id": 123, "date": "...", "chat_id": 456, "status": "success"}
 ```
+
+**Required fields**:
+- `id`, `text`, `sender_id`, `date`, `chat_id`, `status`
 
 **Optional fields** (when present):
 - `is_forwarded`, `forward_from_id`
 - `has_media`, `media_type`
 - `reactions`: `[{emoji, count}]`
 
+**Status values**: `success` | `failed` | `pending`
+
 ### config.py (Configuration)
 
 **Priority**: ENV > YAML > Defaults
 
 **Env vars**:
-- `TELEGRAM_API_ID`
-- `TELEGRAM_API_HASH`
+- `TELEGRAM_API_ID` (app mode)
+- `TELEGRAM_API_HASH` (app mode)
+- `TELEGRAM_BOT_TOKEN` (bot mode)
 
 **YAML**: `~/.tele/config.yaml`
 
@@ -113,6 +154,7 @@ True/False
 | CLI | Click exceptions, exit codes |
 | Client | Raise to CLI, print to stderr |
 | Filter | SyntaxError for parse, ValueError for eval |
+| BotClient | Retry on transient errors, exit on auth failure |
 
 ## Testing Strategy
 
@@ -121,7 +163,8 @@ True/False
 | filter.py | Lexer, parser, evaluator (pure functions) |
 | state.py | File I/O, edge cases |
 | config.py | Env override, file parsing |
-| output.py | Serialization |
+| output.py | Serialization, status field |
+| bot_client.py | Polling, offset handling |
 | integration | E2E pipeline flows |
 
 Integration tests with real Telegram API require credentials (see `tests/integration_manual.py`).
