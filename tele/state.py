@@ -116,3 +116,62 @@ class StateManager:
         path = self._get_state_path(chat_id)
         if path.exists():
             path.unlink()
+
+
+class BotStateManager:
+    """Manages bot mode state (offset-based)."""
+
+    def __init__(self, state_dir: Optional[str] = None):
+        """Initialize bot state manager.
+
+        Args:
+            state_dir: Directory for state files (defaults to ~/.tele/state/)
+        """
+        if state_dir is None:
+            state_dir = os.path.expanduser("~/.tele/state")
+        self.state_dir = Path(state_dir)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+
+    def _state_path(self, chat_id: int) -> Path:
+        """Get the path to a chat's bot state file.
+
+        Args:
+            chat_id: Chat ID
+
+        Returns:
+            Path to state file
+        """
+        return self.state_dir / f"bot_{chat_id}.json"
+
+    def load(self, chat_id: int) -> dict:
+        """Load bot state for a chat.
+
+        Args:
+            chat_id: Chat ID
+
+        Returns:
+            dict with last_update_id (0 if no state) and last_processed_at
+        """
+        path = self._state_path(chat_id)
+        if path.exists():
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, KeyError):
+                pass
+        return {"last_update_id": 0, "last_processed_at": None}
+
+    def save(self, chat_id: int, update_id: int) -> None:
+        """Save bot state after successful processing.
+
+        Args:
+            chat_id: Chat ID
+            update_id: Last processed update ID
+        """
+        path = self._state_path(chat_id)
+        state = {
+            "last_update_id": update_id,
+            "last_processed_at": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        }
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2)
