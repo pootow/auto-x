@@ -17,13 +17,17 @@ from .batcher import MessageBatcher
 from .executor import run_exec_command
 
 
-@click.group(invoke_without_command=True)
+@click.command(context_settings={
+    'ignore_unknown_options': True,
+    'allow_extra_args': True,
+    'allow_interspersed_args': False,  # Stop parsing after first positional
+})
 @click.option('--bot', 'bot_mode', is_flag=True, help='Use Bot API mode (daemon)')
 @click.option('--chat', '-c', 'chat_name', help='Chat name or ID')
 @click.option('--search', '-s', help='Search query (app mode only)')
 @click.option('--filter', '-f', 'filter_expr', help='DSL filter expression')
 @click.option('--full', is_flag=True, help='Full processing (ignore incremental state)')
-@click.option('--mark', is_flag=True, help='Mark mode (read message IDs from stdin)')
+@click.option('--mark', 'mark_mode', is_flag=True, help='Mark mode (read message IDs from stdin)')
 @click.option('--reaction', '-r', default='👍', help='Reaction emoji for marking (default: 👍)')
 @click.option('--failed-mark', default='👎', help='Failed reaction emoji (bot mode)')
 @click.option('--config', 'config_path', help='Path to config file')
@@ -40,7 +44,7 @@ def cli(
     search: Optional[str],
     filter_expr: Optional[str],
     full: bool,
-    mark: bool,
+    mark_mode: bool,
     reaction: str,
     failed_mark: str,
     config_path: Optional[str],
@@ -60,94 +64,74 @@ def cli(
         tele --chat "chat_name" --search "keywords"
 
         # App mode - Filter messages
-        tele --chat "chat_name" --filter 'contains("test") && !has_reaction("✅")'
+        tele --chat "chat_name" --filter 'contains("test")'
 
         # App mode - Mark messages (read from stdin)
-        tele --mark --reaction "✅"
+        tele --mark --reaction "👍"
 
         # Bot mode - Daemon with processor
         tele --bot --chat 12345 --exec "my-processor"
 
-        # Pipeline (app mode)
-        tele --chat "chat_name" --filter 'contains("important")' | process-message | tele --mark
-    """
-    ctx.ensure_object(dict)
+        # Bot mode - Use -- to pass command with args (avoids quoting)
+        tele --bot -- python processor.py --arg value
 
+        # Pipeline (app mode)
+        tele --chat "chat_name" | processor | tele --mark
+    """
     # Load config
     config = load_config(config_path)
-    ctx.obj['config'] = config
+
+    # Handle -- separator for bot mode (extra args become the exec command)
+    extra_args = ctx.args if ctx.args else []
 
     # Bot mode
     if bot_mode:
-        ctx.obj['bot_mode'] = True
-        ctx.obj['chat_name'] = chat_name
-        ctx.obj['filter_expr'] = filter_expr
-        ctx.obj['reaction'] = reaction
-        ctx.obj['failed_mark'] = failed_mark
-        ctx.obj['page_size'] = page_size
-        ctx.obj['interval'] = interval
-        ctx.obj['exec_cmd'] = exec_cmd
+        # Use extra args as exec command if provided via --
+        if extra_args and not exec_cmd:
+            exec_cmd = ' '.join(extra_args)
+        elif extra_args and exec_cmd:
+            # Both --exec and extra args - append them
+            exec_cmd = f"{exec_cmd} {' '.join(extra_args)}"
+
+        if not exec_cmd:
+            raise click.UsageError("--bot mode requires --exec <command> or use -- <command>")
+
+        asyncio.run(run_bot_mode(
+            config=config,
+            chat_name=chat_name,
+            filter_expr=filter_expr,
+            reaction=reaction,
+            failed_mark=failed_mark,
+            page_size=page_size,
+            interval=interval,
+            exec_cmd=exec_cmd,
+        ))
         return
 
-    # Apply defaults
-    if chat_name is None:
-        chat_name = config.defaults.chat
-
-    if mark:
-        # Mark mode - read from stdin
-        ctx.obj['mark'] = True
-        ctx.obj['reaction'] = reaction
+    # Mark mode
+    if mark_mode:
+        asyncio.run(run_mark_mode(
+            config=config,
+            reaction=reaction,
+        ))
         return
 
     # Get messages mode
     if chat_name is None:
+        chat_name = config.defaults.chat
+
+    if chat_name is None:
         raise click.UsageError("Chat name or ID is required (use --chat or set default in config)")
 
-    ctx.obj['chat_name'] = chat_name
-    ctx.obj['search'] = search
-    ctx.obj['filter_expr'] = filter_expr
-    ctx.obj['full'] = full
-    ctx.obj['batch_size'] = batch_size
-    ctx.obj['limit'] = limit
-    ctx.obj['reaction'] = reaction
-
-
-@cli.result_callback()
-@click.pass_context
-def process(ctx: click.Context, result, **kwargs) -> None:
-    """Process the command."""
-    if ctx.obj.get('bot_mode'):
-        # Bot mode - daemon loop
-        if not ctx.obj.get('exec_cmd'):
-            raise click.UsageError("--bot mode requires --exec <command>")
-        # --chat is optional in bot mode (process all chats if not specified)
-        asyncio.run(run_bot_mode(
-            config=ctx.obj['config'],
-            chat_name=ctx.obj.get('chat_name'),  # Optional
-            filter_expr=ctx.obj.get('filter_expr'),
-            reaction=ctx.obj['reaction'],
-            failed_mark=ctx.obj['failed_mark'],
-            page_size=ctx.obj['page_size'],
-            interval=ctx.obj['interval'],
-            exec_cmd=ctx.obj['exec_cmd'],
-        ))
-    elif ctx.obj.get('mark'):
-        # Mark mode
-        asyncio.run(run_mark_mode(
-            config=ctx.obj['config'],
-            reaction=ctx.obj['reaction'],
-        ))
-    elif 'chat_name' in ctx.obj:
-        # Get messages mode
-        asyncio.run(run_get_messages(
-            config=ctx.obj['config'],
-            chat_name=ctx.obj['chat_name'],
-            search=ctx.obj.get('search'),
-            filter_expr=ctx.obj.get('filter_expr'),
-            full=ctx.obj.get('full', False),
-            batch_size=ctx.obj.get('batch_size', 100),
-            limit=ctx.obj.get('limit'),
-        ))
+    asyncio.run(run_get_messages(
+        config=config,
+        chat_name=chat_name,
+        search=search,
+        filter_expr=filter_expr,
+        full=full,
+        batch_size=batch_size,
+        limit=limit,
+    ))
 
 
 async def run_bot_mode(
@@ -407,7 +391,7 @@ async def run_mark_mode(config, reaction: str) -> None:
 
 def main() -> None:
     """Main entry point."""
-    cli(obj={})
+    cli()
 
 
 if __name__ == '__main__':
