@@ -24,8 +24,8 @@ from .executor import run_exec_command
 @click.option('--filter', '-f', 'filter_expr', help='DSL filter expression')
 @click.option('--full', is_flag=True, help='Full processing (ignore incremental state)')
 @click.option('--mark', is_flag=True, help='Mark mode (read message IDs from stdin)')
-@click.option('--reaction', '-r', default='✅', help='Reaction emoji for marking (default: ✅)')
-@click.option('--failed-mark', default='❌', help='Failed reaction emoji (bot mode)')
+@click.option('--reaction', '-r', default='👍', help='Reaction emoji for marking (default: 👍)')
+@click.option('--failed-mark', default='👎', help='Failed reaction emoji (bot mode)')
 @click.option('--config', 'config_path', help='Path to config file')
 @click.option('--batch-size', '-b', default=100, help='Batch size for fetching messages')
 @click.option('--limit', '-l', type=int, help='Maximum number of messages to fetch')
@@ -197,11 +197,12 @@ async def run_bot_mode(
             # Mark messages based on status
             for result in results:
                 msg_id = result.get('id')
-                result_chat_id = result.get('chat_id')  # Use chat_id from output
-                status = result.get('status', 'success')
+                result_chat_id = result.get('chat_id')
+                status = result.get('status')
 
-                if not result_chat_id:
-                    print(f"Skipping message {msg_id}: no chat_id in output", file=sys.stderr)
+                # Skip if missing required fields
+                if not msg_id or not result_chat_id or not status:
+                    print(f"Skipping result: missing id/chat_id/status: {result}", file=sys.stderr)
                     continue
 
                 emoji = reaction if status == 'success' else failed_mark

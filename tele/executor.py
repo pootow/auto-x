@@ -52,7 +52,13 @@ async def run_exec_command(
     for line in stdout.decode().strip().split("\n"):
         if line:
             try:
-                results.append(json.loads(line))
+                result = json.loads(line)
+                # Must have id and chat_id at minimum
+                if 'id' in result and 'chat_id' in result:
+                    # Default to failed if no status
+                    if 'status' not in result:
+                        result['status'] = 'failed'
+                    results.append(result)
             except json.JSONDecodeError:
                 pass  # Skip invalid lines
 
