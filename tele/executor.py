@@ -54,6 +54,10 @@ async def run_exec_command(
 
     stdout, stderr = await proc.communicate(stdin_data.encode())
 
+    # Always log stderr at DEBUG level for debugging processor output
+    if stderr:
+        logger.debug("Processor stderr: %s", stderr.decode())
+
     if proc.returncode != 0:
         logger.error("Command failed (%s): %s", proc.returncode, stderr.decode())
         raise RuntimeError(f"Command failed ({proc.returncode}): {stderr.decode()}")
