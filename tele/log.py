@@ -4,8 +4,12 @@ import logging
 import os
 import sys
 
+# DATAFLOW level (below TRACE) - shows raw JSON in pipeline
+DATAFLOW = 3
 # TRACE level (below DEBUG)
 TRACE = 5
+
+logging.addLevelName(DATAFLOW, "DATAFLOW")
 logging.addLevelName(TRACE, "TRACE")
 
 
@@ -13,13 +17,13 @@ def setup_logging(verbosity: int = 0) -> logging.Logger:
     """Setup logging based on verbosity level.
 
     Args:
-        verbosity: Number of -v flags (0-3)
+        verbosity: Number of -v flags (0-4)
 
     Returns:
         Configured logger for tele
     """
-    levels = [logging.WARNING, logging.INFO, logging.DEBUG, TRACE]
-    level = levels[min(verbosity, 3)]
+    levels = [logging.WARNING, logging.INFO, logging.DEBUG, TRACE, DATAFLOW]
+    level = levels[min(verbosity, 4)]
 
     logger = logging.getLogger("tele")
     logger.setLevel(level)
@@ -52,13 +56,13 @@ def get_log_level_name(verbosity: int) -> str:
     """Convert verbosity count to log level name.
 
     Args:
-        verbosity: Number of -v flags (0-3)
+        verbosity: Number of -v flags (0-4)
 
     Returns:
         Log level name string
     """
-    levels = ["WARNING", "INFO", "DEBUG", "TRACE"]
-    return levels[min(verbosity, 3)]
+    levels = ["WARNING", "INFO", "DEBUG", "TRACE", "DATAFLOW"]
+    return levels[min(verbosity, 4)]
 
 
 def setup_processor_logging() -> logging.Logger:
@@ -79,6 +83,7 @@ def setup_processor_logging() -> logging.Logger:
         "INFO": logging.INFO,
         "DEBUG": logging.DEBUG,
         "TRACE": TRACE,
+        "DATAFLOW": DATAFLOW,
     }
     level = level_map.get(level_name, logging.WARNING)
 

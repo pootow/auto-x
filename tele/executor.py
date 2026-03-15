@@ -5,6 +5,8 @@ import json
 import logging
 from typing import List, Dict, Any
 
+from .log import DATAFLOW
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,6 +31,10 @@ async def run_exec_command(
     # Prepare stdin as JSON Lines
     stdin_data = "\n".join(json.dumps(msg) for msg in messages)
     logger.debug("Running command: %s with %s messages", command, len(messages))
+
+    # Log dataflow to processor
+    for msg in messages:
+        logger.log(DATAFLOW, ">>> %s", json.dumps(msg))
 
     # Execute command
     if shell:
@@ -56,6 +62,7 @@ async def run_exec_command(
     results = []
     for line in stdout.decode().strip().split("\n"):
         if line:
+            logger.log(DATAFLOW, "<<< %s", line)
             try:
                 result = json.loads(line)
                 # Must have id and chat_id at minimum

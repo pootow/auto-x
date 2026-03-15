@@ -10,6 +10,7 @@ from tele.log import (
     get_log_level_name,
     setup_processor_logging,
     TRACE,
+    DATAFLOW,
 )
 
 
@@ -28,11 +29,14 @@ class TestGetLogLevelName:
     def test_verbosity_3_returns_trace(self):
         assert get_log_level_name(3) == "TRACE"
 
-    def test_verbosity_4_capped_at_trace(self):
-        assert get_log_level_name(4) == "TRACE"
+    def test_verbosity_4_returns_dataflow(self):
+        assert get_log_level_name(4) == "DATAFLOW"
 
-    def test_verbosity_10_capped_at_trace(self):
-        assert get_log_level_name(10) == "TRACE"
+    def test_verbosity_5_capped_at_dataflow(self):
+        assert get_log_level_name(5) == "DATAFLOW"
+
+    def test_verbosity_10_capped_at_dataflow(self):
+        assert get_log_level_name(10) == "DATAFLOW"
 
 
 class TestSetupLogging:
@@ -53,6 +57,10 @@ class TestSetupLogging:
     def test_sets_trace_level_with_vvv(self):
         logger = setup_logging(3)
         assert logger.level == TRACE
+
+    def test_sets_dataflow_level_with_vvvv(self):
+        logger = setup_logging(4)
+        assert logger.level == DATAFLOW
 
     def test_logger_name_is_tele(self):
         logger = setup_logging(0)
@@ -118,6 +126,11 @@ class TestSetupProcessorLogging:
         logger = setup_processor_logging()
         assert logger.level == TRACE
 
+    def test_uses_env_var_dataflow(self, monkeypatch):
+        monkeypatch.setenv("TELE_LOG_LEVEL", "DATAFLOW")
+        logger = setup_processor_logging()
+        assert logger.level == DATAFLOW
+
     def test_uses_env_var_error(self, monkeypatch):
         monkeypatch.setenv("TELE_LOG_LEVEL", "ERROR")
         logger = setup_processor_logging()
@@ -153,3 +166,30 @@ class TestTraceLevel:
 
     def test_trace_level_name_registered(self):
         assert logging.getLevelName(TRACE) == "TRACE"
+
+
+class TestDataflowLevel:
+    """Tests for DATAFLOW log level."""
+
+    def test_dataflow_is_below_trace(self):
+        assert DATAFLOW < TRACE
+
+    def test_dataflow_value_is_3(self):
+        assert DATAFLOW == 3
+
+    def test_dataflow_level_name_registered(self):
+        assert logging.getLevelName(DATAFLOW) == "DATAFLOW"
+
+    def test_dataflow_shows_json_output(self, capsys):
+        logger = setup_logging(4)  # DATAFLOW level
+        logger.log(DATAFLOW, '>>> {"id": 1, "chat_id": 123}')
+        captured = capsys.readouterr()
+        assert '[DATAFLOW] >>> {"id": 1, "chat_id": 123}' in captured.err
+
+    def test_trace_filters_dataflow(self, capsys):
+        logger = setup_logging(3)  # TRACE level
+        logger.log(DATAFLOW, "This should be filtered")
+        logger.log(TRACE, "This should appear")
+        captured = capsys.readouterr()
+        assert "This should be filtered" not in captured.err
+        assert "This should appear" in captured.err

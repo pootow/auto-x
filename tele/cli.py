@@ -16,7 +16,7 @@ from .output import format_message, parse_message_id
 from .bot_client import BotClient
 from .batcher import MessageBatcher
 from .executor import run_exec_command
-from .log import setup_logging, get_logger, get_log_level_name
+from .log import setup_logging, get_logger, get_log_level_name, DATAFLOW
 
 
 @click.command(context_settings={
@@ -38,7 +38,7 @@ from .log import setup_logging, get_logger, get_log_level_name
 @click.option('--page-size', default=10, help='Messages per batch (bot mode)')
 @click.option('--interval', default=3.0, help='Debounce interval in seconds (bot mode)')
 @click.option('--exec', 'exec_cmd', help='Command to process messages (bot mode)')
-@click.option('-v', '--verbose', count=True, help='Increase verbosity (-v, -vv, -vvv)')
+@click.option('-v', '--verbose', count=True, help='Increase verbosity (-v, -vv, -vvv, -vvvv)')
 @click.pass_context
 def cli(
     ctx: click.Context,
@@ -342,7 +342,9 @@ async def run_get_messages(
             ):
                 if msg_filter and not msg_filter.matches(message):
                     continue
-                print(format_message(message, chat_id))
+                output = format_message(message, chat_id)
+                logger.log(DATAFLOW, ">>> %s", output)
+                print(output)
                 message_count += 1
                 if message.id > last_id:
                     last_id = message.id
@@ -356,7 +358,9 @@ async def run_get_messages(
             ):
                 if msg_filter and not msg_filter.matches(message):
                     continue
-                print(format_message(message, chat_id))
+                output = format_message(message, chat_id)
+                logger.log(DATAFLOW, ">>> %s", output)
+                print(output)
                 message_count += 1
                 if message.id > last_id:
                     last_id = message.id
@@ -403,6 +407,8 @@ async def run_mark_mode(config, reaction: str) -> None:
             line = line.strip()
             if not line:
                 continue
+
+            logger.log(DATAFLOW, "<<< %s", line)
 
             try:
                 message_id, chat_id = parse_message_id(line)
