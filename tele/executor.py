@@ -2,7 +2,10 @@
 
 import asyncio
 import json
+import logging
 from typing import List, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 
 async def run_exec_command(
@@ -25,6 +28,7 @@ async def run_exec_command(
     """
     # Prepare stdin as JSON Lines
     stdin_data = "\n".join(json.dumps(msg) for msg in messages)
+    logger.debug("Running command: %s with %s messages", command, len(messages))
 
     # Execute command
     if shell:
@@ -45,6 +49,7 @@ async def run_exec_command(
     stdout, stderr = await proc.communicate(stdin_data.encode())
 
     if proc.returncode != 0:
+        logger.error("Command failed (%s): %s", proc.returncode, stderr.decode())
         raise RuntimeError(f"Command failed ({proc.returncode}): {stderr.decode()}")
 
     # Parse stdout as JSON Lines
@@ -59,7 +64,10 @@ async def run_exec_command(
                     if 'status' not in result:
                         result['status'] = 'failed'
                     results.append(result)
+                    logger.debug("Parsed result: id=%s status=%s", result.get('id'), result.get('status'))
             except json.JSONDecodeError:
+                logger.warning("Skipping invalid JSON line: %s...", line[:50])
                 pass  # Skip invalid lines
 
+    logger.debug("Command returned %s results", len(results))
     return results

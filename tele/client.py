@@ -1,5 +1,6 @@
 """Telethon client wrapper for Telegram API operations."""
 
+import logging
 import os
 from typing import Optional, Union, List, AsyncIterator
 
@@ -7,6 +8,8 @@ from telethon import TelegramClient
 from telethon.tl.types import InputPeerUser, InputPeerChat, InputPeerChannel, PeerUser, PeerChat, PeerChannel
 from telethon.tl.functions.messages import SearchRequest
 from telethon.tl.types import InputMessagesFilterEmpty
+
+logger = logging.getLogger(__name__)
 
 
 class TeleClient:
@@ -40,19 +43,25 @@ class TeleClient:
 
     async def connect(self) -> None:
         """Connect to Telegram."""
+        logger.debug("Connecting to Telegram...")
         await self.client.connect()
+        logger.info("Connected to Telegram")
 
     async def disconnect(self) -> None:
         """Disconnect from Telegram."""
+        logger.debug("Disconnecting from Telegram...")
         await self.client.disconnect()
+        logger.info("Disconnected from Telegram")
 
     async def ensure_authorized(self) -> None:
         """Ensure the client is authorized, prompting for login if needed."""
         if not await self.client.is_user_authorized():
+            logger.info("Not authorized, requesting login...")
             await self.client.send_code_request(self.api_id)
             print("Enter the code you received: ")
             code = input()
             await self.client.sign_in(self.api_id, code)
+            logger.info("Successfully authorized")
 
     async def resolve_chat(self, chat: Union[str, int]) -> Union[InputPeerUser, InputPeerChat, InputPeerChannel]:
         """Resolve a chat name or ID to an input peer.
@@ -63,11 +72,14 @@ class TeleClient:
         Returns:
             InputPeer suitable for API calls
         """
+        logger.debug("Resolving chat: %s", chat)
         # If it's already an integer, treat as ID
         if isinstance(chat, int):
             try:
                 entity = await self.client.get_entity(chat)
-                return self.client.get_input_entity(entity)
+                result = self.client.get_input_entity(entity)
+                logger.debug("Resolved chat ID %s to %s", chat, type(result).__name__)
+                return result
             except Exception:
                 raise ValueError(f"Could not find chat with ID: {chat}")
 
@@ -79,14 +91,18 @@ class TeleClient:
         # Try username lookup
         try:
             entity = await self.client.get_entity(chat_str)
-            return self.client.get_input_entity(entity)
+            result = self.client.get_input_entity(entity)
+            logger.debug("Resolved username '%s' to %s", chat_str, type(result).__name__)
+            return result
         except Exception:
             pass
 
         # Try searching in dialogs
         async for dialog in self.client.iter_dialogs():
             if dialog.name == chat or dialog.name.lower() == chat_str.lower():
-                return self.client.get_input_entity(dialog.entity)
+                result = self.client.get_input_entity(dialog.entity)
+                logger.debug("Resolved dialog name '%s' to %s", chat, type(result).__name__)
+                return result
 
         raise ValueError(f"Could not resolve chat: {chat}")
 
@@ -235,6 +251,7 @@ class TeleClient:
         """
         peer = await self.resolve_chat(chat)
         await self.client.send_reaction(peer, message_id, emoji)
+        logger.debug("Added reaction %s to message %s", emoji, message_id)
         return True
 
     async def get_dialogs(self) -> List:

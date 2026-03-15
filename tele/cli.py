@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import sys
 from typing import Optional, List
 
@@ -15,6 +16,7 @@ from .output import format_message, parse_message_id
 from .bot_client import BotClient
 from .batcher import MessageBatcher
 from .executor import run_exec_command
+from .log import setup_logging, get_logger, get_log_level_name
 
 
 @click.command(context_settings={
@@ -36,6 +38,7 @@ from .executor import run_exec_command
 @click.option('--page-size', default=10, help='Messages per batch (bot mode)')
 @click.option('--interval', default=3.0, help='Debounce interval in seconds (bot mode)')
 @click.option('--exec', 'exec_cmd', help='Command to process messages (bot mode)')
+@click.option('-v', '--verbose', count=True, help='Increase verbosity (-v, -vv, -vvv)')
 @click.pass_context
 def cli(
     ctx: click.Context,
@@ -53,6 +56,7 @@ def cli(
     page_size: int,
     interval: float,
     exec_cmd: Optional[str],
+    verbose: int,
 ) -> None:
     """Telegram message processing pipeline tool.
 
@@ -78,6 +82,12 @@ def cli(
         # Pipeline (app mode)
         tele --chat "chat_name" | processor | tele --mark
     """
+    # Setup logging based on verbosity
+    logger = setup_logging(verbose)
+
+    # Set TELE_LOG_LEVEL for subprocess (processors)
+    os.environ['TELE_LOG_LEVEL'] = get_log_level_name(verbose)
+
     # Load config
     config = load_config(config_path)
 
@@ -105,6 +115,7 @@ def cli(
             page_size=page_size,
             interval=interval,
             exec_cmd=exec_cmd,
+            verbose=verbose,
         ))
         return
 
@@ -143,6 +154,7 @@ async def run_bot_mode(
     page_size: int,
     interval: float,
     exec_cmd: str,
+    verbose: int = 0,
 ) -> None:
     """Run bot mode daemon loop.
 
@@ -155,7 +167,9 @@ async def run_bot_mode(
         page_size: Messages per batch
         interval: Debounce interval
         exec_cmd: Command to process messages
+        verbose: Verbosity level
     """
+    logger = get_logger("tele.bot")
     if not config.telegram.bot_token:
         raise click.ClickException("TELEGRAM_BOT_TOKEN required for bot mode")
 
@@ -186,14 +200,15 @@ async def run_bot_mode(
 
                 # Skip if missing required fields
                 if not msg_id or not result_chat_id or not status:
-                    print(f"Skipping result: missing id/chat_id/status: {result}", file=sys.stderr)
+                    logger.warning("Skipping result: missing id/chat_id/status: %s", result)
                     continue
 
                 emoji = reaction if status == 'success' else failed_mark
                 try:
                     await client.add_reaction(result_chat_id, msg_id, emoji)
+                    logger.debug("Marked message %s in chat %s with %s", msg_id, result_chat_id, emoji)
                 except Exception as e:
-                    print(f"Failed to mark message {msg_id} in chat {result_chat_id}: {e}", file=sys.stderr)
+                    logger.error("Failed to mark message %s in chat %s: %s", msg_id, result_chat_id, e)
 
             # Update offset on success
             if results:
@@ -202,7 +217,7 @@ async def run_bot_mode(
                 pass
 
         except Exception as e:
-            print(f"Batch processing failed: {e}", file=sys.stderr)
+            logger.error("Batch processing failed: %s", e)
 
     batcher.on_batch = process_batch
 
@@ -216,9 +231,9 @@ async def run_bot_mode(
 
     try:
         if chat_filter:
-            print(f"Bot mode started, monitoring chat {chat_filter}...", file=sys.stderr)
+            logger.info("Bot mode started, monitoring chat %s...", chat_filter)
         else:
-            print("Bot mode started, monitoring all chats...", file=sys.stderr)
+            logger.info("Bot mode started, monitoring all chats...")
         while True:
             updates = await client.poll_updates(offset=offset + 1)
 
@@ -247,12 +262,13 @@ async def run_bot_mode(
                 # Add to batcher
                 import json
                 await batcher.add(json.loads(formatted))
+                logger.debug("Queued message %s for processing", message.get('message_id'))
 
                 # Save state after each update
                 state_mgr.save(state_key, update_id)
 
     except KeyboardInterrupt:
-        print("\nShutting down...", file=sys.stderr)
+        logger.info("Shutting down...")
         await batcher.flush_remaining()
     finally:
         await client.close()
@@ -278,6 +294,7 @@ async def run_get_messages(
         batch_size: Batch size for fetching
         limit: Maximum messages to fetch
     """
+    logger = get_logger("tele.app")
     # Initialize client
     client = TeleClient(
         api_id=config.telegram.api_id,
@@ -292,13 +309,16 @@ async def run_get_messages(
     state_manager = StateManager()
 
     try:
+        logger.debug("Connecting to Telegram...")
         await client.connect()
+        logger.info("Connected to Telegram")
 
         # Resolve chat
         try:
             chat_id = await client.get_chat_id(chat_name)
+            logger.debug("Resolved chat '%s' to ID %s", chat_name, chat_id)
         except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
+            logger.error("Could not resolve chat: %s", e)
             sys.exit(1)
 
         # Determine min_id for incremental processing
@@ -306,6 +326,8 @@ async def run_get_messages(
         if not full and search is None:
             state = state_manager.load(chat_id)
             min_id = state.last_message_id if state.last_message_id > 0 else None
+            if min_id:
+                logger.debug("Resuming from message ID %s", min_id)
 
         # Fetch messages
         max_id = None  # Will be set after fetching for state update
@@ -313,6 +335,7 @@ async def run_get_messages(
         last_id = 0
 
         if search:
+            logger.debug("Searching for '%s'", search)
             # Search mode - no incremental optimization
             async for message in client.iter_search_messages(
                 chat_name, search, limit=limit
@@ -338,14 +361,18 @@ async def run_get_messages(
                 if message.id > last_id:
                     last_id = message.id
 
+        logger.debug("Processed %s messages", message_count)
+
         # Update state if we processed messages
         if not full and last_id > 0:
             state_manager.update(chat_id, last_id)
+            logger.debug("Updated state to message ID %s", last_id)
 
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error("Error: %s", e)
         sys.exit(1)
     finally:
+        logger.debug("Disconnecting from Telegram...")
         await client.disconnect()
 
 
@@ -358,6 +385,7 @@ async def run_mark_mode(config, reaction: str) -> None:
         config: Configuration
         reaction: Emoji to use for reaction
     """
+    logger = get_logger("tele.mark")
     # Initialize client
     client = TeleClient(
         api_id=config.telegram.api_id,
@@ -366,7 +394,9 @@ async def run_mark_mode(config, reaction: str) -> None:
     )
 
     try:
+        logger.debug("Connecting to Telegram...")
         await client.connect()
+        logger.info("Connected to Telegram")
 
         # Read from stdin
         for line in sys.stdin:
@@ -377,15 +407,17 @@ async def run_mark_mode(config, reaction: str) -> None:
             try:
                 message_id, chat_id = parse_message_id(line)
                 await client.add_reaction(chat_id, message_id, reaction)
+                logger.debug("Added reaction %s to message %s in chat %s", reaction, message_id, chat_id)
             except json.JSONDecodeError:
-                print(f"Error: Invalid JSON line: {line}", file=sys.stderr)
+                logger.warning("Invalid JSON line: %s", line)
             except Exception as e:
-                print(f"Error: {e}", file=sys.stderr)
+                logger.error("Error processing line: %s", e)
 
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error("Error: %s", e)
         sys.exit(1)
     finally:
+        logger.debug("Disconnecting from Telegram...")
         await client.disconnect()
 
 

@@ -21,12 +21,23 @@ Usage:
 """
 
 import json
+import logging
 import os
 import re
 import shlex
 import subprocess
 import sys
 from pathlib import Path
+
+# Add tele module to path for importing log utilities
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from tele.log import setup_processor_logging, TRACE
+
+# Setup logging based on TELE_LOG_LEVEL env var
+setup_processor_logging()
+
+logger = logging.getLogger(__name__)
 
 # URL extraction pattern - matches http and https URLs
 URL_PATTERN = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
@@ -91,7 +102,7 @@ def download_with_ytdlp(url: str, dest_dir: Path) -> tuple[bool, str]:
             url
         ]
 
-        print(f"[INFO] Running: {' '.join(cmd)}", file=sys.stderr)
+        logger.debug("Running: %s", ' '.join(cmd))
         result = subprocess.run(
             cmd,
             stdout=sys.stderr,  # Redirect yt-dlp stdout to stderr (prevents stdout pollution)
@@ -101,21 +112,21 @@ def download_with_ytdlp(url: str, dest_dir: Path) -> tuple[bool, str]:
         )
 
         if result.returncode == 0:
-            print(f"[INFO] Downloaded: {url}", file=sys.stderr)
+            logger.info("Downloaded: %s", url)
             return True, "Downloaded"
         else:
             error_msg = result.stderr or "yt-dlp failed"
-            print(f"[ERROR] yt-dlp failed for {url}: {error_msg}", file=sys.stderr)
+            logger.error("yt-dlp failed for %s: %s", url, error_msg)
             return False, error_msg
 
     except subprocess.TimeoutExpired:
-        print(f"[ERROR] Download timed out for {url}", file=sys.stderr)
+        logger.error("Download timed out for %s", url)
         return False, "Download timed out"
     except FileNotFoundError:
-        print(f"[ERROR] yt-dlp not found on PATH", file=sys.stderr)
+        logger.error("yt-dlp not found on PATH")
         return False, "yt-dlp not found"
     except Exception as e:
-        print(f"[ERROR] Unexpected error downloading {url}: {e}", file=sys.stderr)
+        logger.error("Unexpected error downloading %s: %s", url, e)
         return False, str(e)
 
 
@@ -179,7 +190,7 @@ def main():
             result = process_message(msg)
             print(json.dumps(result))
         except json.JSONDecodeError as e:
-            print(f"[ERROR] Invalid JSON: {e}", file=sys.stderr)
+            logger.error("Invalid JSON: %s", e)
             print(json.dumps({"id": 0, "chat_id": 0, "status": "failed"}))
 
 
