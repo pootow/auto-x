@@ -18,6 +18,16 @@ Usage:
 
     # With environment variable for defaults
     YTDLPOPTS="--no-playlist -f best" echo '{"id":1,"chat_id":123,"text":"https://youtube.com/watch?v=xxx"}' | python processors/downloader/ytdlp.py
+
+    # With verbosity flags (prefix + to distinguish from yt-dlp args)
+    echo '{"id":1,"chat_id":123,"text":"https://youtube.com/watch?v=xxx"}' | python processors/downloader/ytdlp.py +v
+    echo '{"id":1,"chat_id":123,"text":"https://youtube.com/watch?v=xxx"}' | python processors/downloader/ytdlp.py +vv
+    echo '{"id":1,"chat_id":123,"text":"https://youtube.com/watch?v=xxx"}' | python processors/downloader/ytdlp.py +vvv
+
+Script Flags (prefixed with +):
+    +v    INFO level, print commands
+    +vv   DEBUG level, print commands + debug logging
+    +vvv  TRACE level, print commands + trace logging
 """
 
 import json
@@ -35,8 +45,50 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from tele.log import setup_processor_logging, TRACE
 
-# Setup logging based on TELE_LOG_LEVEL env var
+
+def parse_script_args() -> tuple[int, list[str]]:
+    """
+    Parse sys.argv to separate script flags from yt-dlp passthrough args.
+
+    Script flags start with '+' (e.g., +v, +vv, +vvv).
+
+    Returns:
+        tuple of (verbosity_level, passthrough_args)
+        verbosity_level: 0=WARNING, 1=INFO, 2=DEBUG, 3=TRACE
+    """
+    verbosity = 0
+    passthrough = []
+
+    for arg in sys.argv[1:]:
+        if arg.startswith('+'):
+            # Count 'v' repeats for verbosity level
+            if arg.startswith('+v'):
+                verbosity = max(verbosity, arg.count('v'))
+        else:
+            passthrough.append(arg)
+
+    return verbosity, passthrough
+
+
+# Parse script args first (before logging setup)
+_VERBOSITY, _PASSTHROUGH_ARGS = parse_script_args()
+
+# Map verbosity to log levels
+_VERBOSITY_LEVELS = {
+    0: logging.WARNING,  # default
+    1: logging.INFO,     # +v
+    2: logging.DEBUG,    # +vv
+    3: TRACE,            # +vvv
+}
+
+# Setup logging based on verbosity or TELE_LOG_LEVEL env var
 setup_processor_logging()
+if _VERBOSITY > 0:
+    level = _VERBOSITY_LEVELS.get(_VERBOSITY, logging.WARNING)
+    root = logging.getLogger()
+    root.setLevel(level)
+    for handler in root.handlers:
+        handler.setLevel(level)
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +115,13 @@ def extract_urls(text: str) -> list[str]:
     return URL_PATTERN.findall(text)
 
 
-def get_ytdlp_opts() -> list[str]:
+def get_ytdlp_opts(passthrough_args: list[str] | None = None) -> list[str]:
     """
-    Get yt-dlp options from environment variable and CLI args.
+    Get yt-dlp options from environment variable and passthrough args.
 
     Priority (later options override earlier in yt-dlp):
     1. YTDLPOPTS environment variable (user defaults)
-    2. CLI arguments passed to this script (per-run overrides)
+    2. Passthrough args (per-run overrides)
 
     Returns:
         List of yt-dlp command-line options.
@@ -81,8 +133,9 @@ def get_ytdlp_opts() -> list[str]:
     if env_opts:
         opts.extend(shlex.split(env_opts))
 
-    # 2. CLI args passthrough (everything after script name)
-    opts.extend(sys.argv[1:])
+    # 2. Passthrough args
+    if passthrough_args is not None:
+        opts.extend(passthrough_args)
 
     return opts
 
@@ -152,7 +205,7 @@ def download_with_aria2c(url: str, dest_dir: Path, filename: str) -> tuple[bool,
             url
         ]
 
-        logger.debug("Running aria2c: %s", ' '.join(cmd))
+        logger.info("Running aria2c: %s", ' '.join(cmd))
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=DOWNLOAD_TIMEOUT)
 
         if result.returncode == 0:
@@ -217,20 +270,33 @@ def process_metadata_mode(urls: list[str]) -> tuple[str, list[dict]]:
     template = load_template()
     replies = []
 
+    # Filter out metadata mode flags from passthrough to avoid duplicates
+    extra_opts = [a for a in _PASSTHROUGH_ARGS if a not in ("--write-info-json", "--skip-download")]
+
     for url in urls:
         # Run yt-dlp to get metadata
-        cmd = ["yt-dlp", "--write-info-json", "--skip-download", url]
+        cmd = ["yt-dlp", "--write-info-json", "--skip-download", *get_ytdlp_opts(extra_opts), url]
 
+        logger.info("Running: %s", ' '.join(cmd))
         try:
             result = subprocess.run(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,  # Capture stdout (info.json path may be here)
+                stderr=subprocess.PIPE,  # Capture stderr (info.json path may be here too)
                 text=True,
                 timeout=DOWNLOAD_TIMEOUT
             )
 
-            # Parse info.json paths from stderr
-            info_paths = parse_info_json_paths(result.stderr)
+            # Print captured output so user can see yt-dlp logs
+            if result.stdout:
+                sys.stderr.write(result.stdout)  # To stderr to avoid polluting JSON output
+                sys.stderr.flush()
+            if result.stderr:
+                sys.stderr.write(result.stderr)
+                sys.stderr.flush()
+
+            # Parse info.json paths from both stdout and stderr
+            info_paths = parse_info_json_paths(result.stdout + result.stderr)
 
             if not info_paths:
                 logger.error("No info.json files found for %s", url)
@@ -335,7 +401,7 @@ def process_message(msg: dict) -> dict:
         }
 
     # Check for metadata mode
-    opts = get_ytdlp_opts()
+    opts = get_ytdlp_opts(_PASSTHROUGH_ARGS)
     if is_metadata_mode(opts):
         # Metadata mode: get info, return rich reply
         status, replies = process_metadata_mode(urls)
@@ -380,15 +446,15 @@ def download_with_ytdlp(url: str, dest_dir: Path) -> tuple[bool, str]:
             "yt-dlp",
             "--paths", str(dest_dir),
             "--output", "%(title)s.%(ext)s",
-            *get_ytdlp_opts(),
+            *get_ytdlp_opts(_PASSTHROUGH_ARGS),
             url
         ]
 
-        logger.debug("Running: %s", ' '.join(cmd))
+        logger.info("Running: %s", ' '.join(cmd))
         result = subprocess.run(
             cmd,
             stdout=sys.stderr,  # Redirect yt-dlp stdout to stderr (prevents stdout pollution)
-            stderr=subprocess.PIPE,  # Capture stderr for error detection
+            # stderr inherits for real-time progress output
             text=True,
             timeout=DOWNLOAD_TIMEOUT
         )
@@ -397,9 +463,8 @@ def download_with_ytdlp(url: str, dest_dir: Path) -> tuple[bool, str]:
             logger.info("Downloaded: %s", url)
             return True, "Downloaded"
         else:
-            error_msg = result.stderr or "yt-dlp failed"
-            logger.error("yt-dlp failed for %s: %s", url, error_msg)
-            return False, error_msg
+            logger.error("yt-dlp failed for %s (exit code %s)", url, result.returncode)
+            return False, f"yt-dlp failed (exit code {result.returncode})"
 
     except subprocess.TimeoutExpired:
         logger.error("Download timed out for %s", url)

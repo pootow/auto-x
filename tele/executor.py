@@ -36,31 +36,25 @@ async def run_exec_command(
     for msg in messages:
         logger.log(DATAFLOW, ">>> %s", json.dumps(msg))
 
-    # Execute command
+    # Execute command (stderr inherits for real-time processor logs)
     if shell:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
         )
     else:
         proc = await asyncio.create_subprocess_exec(
             *command.split(),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
         )
 
-    stdout, stderr = await proc.communicate(stdin_data.encode())
-
-    # Always log stderr at DEBUG level for debugging processor output
-    if stderr:
-        logger.debug("Processor stderr: %s", stderr.decode())
+    stdout, _ = await proc.communicate(stdin_data.encode())
 
     if proc.returncode != 0:
-        logger.error("Command failed (%s): %s", proc.returncode, stderr.decode())
-        raise RuntimeError(f"Command failed ({proc.returncode}): {stderr.decode()}")
+        logger.error("Command failed with exit code %s", proc.returncode)
+        raise RuntimeError(f"Command failed with exit code {proc.returncode}")
 
     # Parse stdout as JSON Lines
     results = []
