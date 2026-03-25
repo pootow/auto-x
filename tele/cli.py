@@ -330,6 +330,7 @@ async def run_bot_mode(
                                 await client._call_api("sendMessage", {
                                     "chat_id": result_chat_id,
                                     "text": text,
+                                    "parse_mode": "MarkdownV2",
                                     "reply_to_message_id": msg_id
                                 })
                                 logger.debug("Sent text reply to message %s", msg_id)
