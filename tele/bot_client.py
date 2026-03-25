@@ -141,3 +141,63 @@ class BotClient:
             "reaction": [{"type": "emoji", "emoji": emoji}]
         })
         return True
+
+    async def send_video(
+        self,
+        chat_id: int,
+        video: str,
+        caption: Optional[str] = None,
+        reply_to_message_id: Optional[int] = None
+    ) -> dict:
+        """Send a video by URL.
+
+        Args:
+            chat_id: Target chat ID
+            video: Video URL or file_id
+            caption: Optional caption
+            reply_to_message_id: Optional message ID to reply to
+
+        Returns:
+            Sent message object
+        """
+        params = {
+            "chat_id": chat_id,
+            "video": video,
+        }
+        if caption:
+            params["caption"] = caption
+        if reply_to_message_id:
+            params["reply_to_message_id"] = reply_to_message_id
+
+        logger.debug("Sending video to chat %s", chat_id)
+        return await self._call_api("sendVideo", params)
+
+    async def send_photo(
+        self,
+        chat_id: int,
+        photo: str,
+        caption: Optional[str] = None,
+        reply_to_message_id: Optional[int] = None
+    ) -> dict:
+        """Send a photo by URL.
+
+        Args:
+            chat_id: Target chat ID
+            photo: Photo URL or file_id
+            caption: Optional caption
+            reply_to_message_id: Optional message ID to reply to
+
+        Returns:
+            Sent message object
+        """
+        params = {
+            "chat_id": chat_id,
+            "photo": photo,
+        }
+        if caption:
+            params["caption"] = caption
+        if reply_to_message_id:
+            params["reply_to_message_id"] = reply_to_message_id
+
+        logger.debug("Sending photo to chat %s", chat_id)
+        return await self._call_api("sendPhoto", params)

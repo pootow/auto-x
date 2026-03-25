@@ -312,6 +312,30 @@ async def run_bot_mode(
                 except Exception as e:
                     logger.error("Failed to mark message %s in chat %s: %s", msg_id, result_chat_id, e)
 
+                # Handle rich reply from processor
+                if status == 'success' and 'reply' in result and result['reply']:
+                    for r in result['reply']:
+                        text = r.get('text', '')
+                        media = r.get('media')
+                        try:
+                            if media:
+                                if media.get('type') == 'video':
+                                    await client.send_video(result_chat_id, media['url'], caption=text, reply_to_message_id=msg_id)
+                                    logger.debug("Sent video reply to message %s", msg_id)
+                                elif media.get('type') == 'image':
+                                    await client.send_photo(result_chat_id, media['url'], caption=text, reply_to_message_id=msg_id)
+                                    logger.debug("Sent photo reply to message %s", msg_id)
+                            elif text:
+                                # Text-only reply - send as text message
+                                await client._call_api("sendMessage", {
+                                    "chat_id": result_chat_id,
+                                    "text": text,
+                                    "reply_to_message_id": msg_id
+                                })
+                                logger.debug("Sent text reply to message %s", msg_id)
+                        except Exception as e:
+                            logger.error("Failed to send reply for message %s: %s", msg_id, e)
+
             # Handle fatal errors - append to fatal.jsonl
             if fatal_ids:
                 for item in batch_items:

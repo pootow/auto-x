@@ -7,17 +7,17 @@ Downloads media from supported URLs (YouTube, Twitter/X, Instagram, TikTok, etc.
 to ~/Downloads/tele/
 
 Usage:
-    # Basic usage
+    # Basic usage (direct download, no rich reply)
     echo '{"id":1,"chat_id":123,"text":"https://youtube.com/watch?v=xxx"}' | python processors/downloader/ytdlp.py
+
+    # Metadata mode (rich reply)
+    echo '{"id":1,"chat_id":123,"text":"https://youtube.com/watch?v=xxx"}' | python processors/downloader/ytdlp.py --write-info-json --skip-download
 
     # With CLI args passthrough to yt-dlp
     echo '{"id":1,"chat_id":123,"text":"https://youtube.com/watch?v=xxx"}' | python processors/downloader/ytdlp.py -f best
 
     # With environment variable for defaults
     YTDLPOPTS="--no-playlist -f best" echo '{"id":1,"chat_id":123,"text":"https://youtube.com/watch?v=xxx"}' | python processors/downloader/ytdlp.py
-
-    # Combined: env var + CLI args (CLI overrides env)
-    YTDLPOPTS="--no-playlist" echo '{"id":1,"chat_id":123,"text":"https://youtube.com/watch?v=xxx"}' | python processors/downloader/ytdlp.py -f "bestvideo+bestaudio"
 """
 
 import json
@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -47,6 +48,12 @@ DOWNLOAD_DIR = Path.home() / "Downloads" / "tele"
 
 # Download timeout in seconds (5 minutes for large videos)
 DOWNLOAD_TIMEOUT = 300
+
+# Max video size for Telegram to show directly (50MB)
+MAX_TG_VIDEO_SIZE = 50 * 1024 * 1024
+
+# Pattern to extract info.json file paths from yt-dlp output
+INFO_JSON_PATTERN = re.compile(r'\[info\] Writing .*? metadata as JSON to: (.+\.info\.json)')
 
 
 def extract_urls(text: str) -> list[str]:
@@ -80,9 +87,284 @@ def get_ytdlp_opts() -> list[str]:
     return opts
 
 
+def is_metadata_mode(opts: list[str]) -> bool:
+    """Check if metadata mode is enabled."""
+    return "--write-info-json" in opts and "--skip-download" in opts
+
+
+def parse_info_json_paths(stderr: str) -> list[str]:
+    """Parse yt-dlp stderr to find info.json file paths."""
+    paths = []
+    for match in INFO_JSON_PATTERN.finditer(stderr):
+        paths.append(match.group(1))
+    return paths
+
+
+def select_best_format(formats: list[dict]) -> dict | None:
+    """Select format with largest filesize_approx."""
+    candidates = [f for f in formats if f.get("filesize_approx")]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda f: f.get("filesize_approx", 0))
+
+
+def load_template() -> str:
+    """Load reply template from file."""
+    template_path = Path(__file__).parent / "reply_template.md"
+    if template_path.exists():
+        return template_path.read_text(encoding="utf-8")
+    # Default template
+    return "# {title}\n_Duration: {duration_string}_\nUploader: {uploader}"
+
+
+def render_template(template: str, info: dict) -> str:
+    """Render template with info dict."""
+    # Prepare template variables with defaults
+    vars = {
+        "title": info.get("title", "Unknown"),
+        "duration_string": info.get("duration_string", "?"),
+        "uploader": info.get("uploader", "Unknown"),
+        "webpage_url": info.get("webpage_url", ""),
+        "filesize_mb": round(info.get("filesize_approx", 0) / 1024 / 1024, 1),
+        "like_count": info.get("like_count", 0),
+        "repost_count": info.get("repost_count", 0),
+        "view_count": info.get("view_count", 0),
+    }
+    try:
+        return template.format(**vars)
+    except KeyError as e:
+        logger.warning("Missing template variable: %s", e)
+        return template.format(**{k: v for k, v in vars.items() if k in template})
+
+
+def download_with_aria2c(url: str, dest_dir: Path, filename: str) -> tuple[bool, str]:
+    """Download file using aria2c with resume support."""
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = dest_dir / filename
+
+        cmd = [
+            "aria2c",
+            "--continue",
+            "--max-connection-per-server=1",
+            "--dir", str(dest_dir),
+            "--out", filename,
+            url
+        ]
+
+        logger.debug("Running aria2c: %s", ' '.join(cmd))
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=DOWNLOAD_TIMEOUT)
+
+        if result.returncode == 0:
+            logger.info("Downloaded with aria2c: %s", dest_path)
+            return True, str(dest_path)
+        else:
+            error = result.stderr or "aria2c failed"
+            logger.error("aria2c failed: %s", error)
+            return False, error
+
+    except subprocess.TimeoutExpired:
+        return False, "Download timed out"
+    except FileNotFoundError:
+        return False, "aria2c not found"
+    except Exception as e:
+        return False, str(e)
+
+
+def download_with_urllib(url: str, dest_dir: Path, filename: str) -> tuple[bool, str]:
+    """Download file using urllib with resume support."""
+    import urllib.request
+    import urllib.error
+
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = dest_dir / filename
+
+        # Check for existing partial file
+        existing_size = 0
+        mode = "wb"
+        if dest_path.exists():
+            existing_size = dest_path.stat().st_size
+            mode = "ab"
+
+        req = urllib.request.Request(url)
+        if existing_size > 0:
+            req.add_header("Range", f"bytes={existing_size}-")
+
+        with urllib.request.urlopen(req, timeout=60) as response:
+            with open(dest_path, mode) as f:
+                while True:
+                    chunk = response.read(8192)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+
+        logger.info("Downloaded with urllib: %s", dest_path)
+        return True, str(dest_path)
+
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 404):
+            return False, f"HTTP {e.code}: {e.reason}"
+        return False, f"HTTP error: {e}"
+    except urllib.error.URLError as e:
+        return False, f"URL error: {e}"
+    except Exception as e:
+        return False, str(e)
+
+
+def process_metadata_mode(urls: list[str]) -> tuple[str, list[dict]]:
+    """Process URLs in metadata mode, return status and reply array."""
+    template = load_template()
+    replies = []
+
+    for url in urls:
+        # Run yt-dlp to get metadata
+        cmd = ["yt-dlp", "--write-info-json", "--skip-download", url]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=DOWNLOAD_TIMEOUT
+            )
+
+            # Parse info.json paths from stderr
+            info_paths = parse_info_json_paths(result.stderr)
+
+            if not info_paths:
+                logger.error("No info.json files found for %s", url)
+                return "fatal", []
+
+            # Process each info.json
+            for info_path in info_paths:
+                try:
+                    with open(info_path, 'r', encoding='utf-8') as f:
+                        info = json.load(f)
+                except (json.JSONDecodeError, FileNotFoundError) as e:
+                    logger.error("Failed to load info.json: %s", e)
+                    return "error", []
+
+                # Skip if no formats (not a video/audio)
+                if "formats" not in info:
+                    logger.debug("Skipping non-media info: %s", info_path)
+                    continue
+
+                # Select best format
+                best_format = select_best_format(info["formats"])
+                if not best_format:
+                    logger.warning("No formats with filesize_approx for %s", url)
+                    return "fatal", []
+
+                filesize = best_format.get("filesize_approx", 0)
+                media_type = "video" if info.get("_type") == "video" else "audio"
+                media_url = best_format.get("url", "")
+                thumbnail = info.get("thumbnail", "")
+
+                # Small video -> return URL, large video -> download and return thumbnail
+                if filesize <= MAX_TG_VIDEO_SIZE:
+                    # Small video, no download needed
+                    pass
+                else:
+                    # Large video, download for local archive, use thumbnail for reply
+                    filename = f"{info.get('id', 'video')}.mp4"
+                    if shutil.which("aria2c"):
+                        success, _ = download_with_aria2c(media_url, DOWNLOAD_DIR, filename)
+                    else:
+                        success, _ = download_with_urllib(media_url, DOWNLOAD_DIR, filename)
+
+                    if not success:
+                        return "error", []
+
+                    # Use thumbnail for reply
+                    media_type = "image"
+                    media_url = thumbnail
+
+                # Render text
+                text = render_template(template, {**info, "filesize_approx": filesize})
+
+                replies.append({
+                    "text": text,
+                    "media": {
+                        "type": media_type,
+                        "url": media_url
+                    }
+                })
+
+        except subprocess.TimeoutExpired:
+            return "error", []
+        except Exception as e:
+            logger.error("Error processing %s: %s", url, e)
+            return "error", []
+
+    return "success", replies
+
+
+def process_message(msg: dict) -> dict:
+    """Process a single message and return the result."""
+    # Extract required fields
+    msg_id = msg.get("id")
+    chat_id = msg.get("chat_id")
+
+    # Validate required fields exist
+    if msg_id is None or chat_id is None:
+        return {
+            "id": msg_id or 0,
+            "chat_id": chat_id or 0,
+            "status": "error"
+        }
+
+    # Get message text
+    text = msg.get("text", "")
+    if not text:
+        # No text, nothing to process
+        return {
+            "id": msg_id,
+            "chat_id": chat_id,
+            "status": "success"
+        }
+
+    # Extract URLs from text
+    urls = extract_urls(text)
+    if not urls:
+        # No URLs found
+        return {
+            "id": msg_id,
+            "chat_id": chat_id,
+            "status": "success"
+        }
+
+    # Check for metadata mode
+    opts = get_ytdlp_opts()
+    if is_metadata_mode(opts):
+        # Metadata mode: get info, return rich reply
+        status, replies = process_metadata_mode(urls)
+        result = {
+            "id": msg_id,
+            "chat_id": chat_id,
+            "status": status
+        }
+        if replies:
+            result["reply"] = replies
+        return result
+    else:
+        # Default mode: direct download, no rich reply
+        all_success = True
+        for url in urls:
+            success, _ = download_with_ytdlp(url, DOWNLOAD_DIR)
+            if not success:
+                all_success = False
+
+        return {
+            "id": msg_id,
+            "chat_id": chat_id,
+            "status": "success" if all_success else "error"
+        }
+
+
 def download_with_ytdlp(url: str, dest_dir: Path) -> tuple[bool, str]:
     """
-    Download media using yt-dlp.
+    Download media using yt-dlp (default mode).
 
     Args:
         url: URL to download from
@@ -128,54 +410,6 @@ def download_with_ytdlp(url: str, dest_dir: Path) -> tuple[bool, str]:
     except Exception as e:
         logger.error("Unexpected error downloading %s: %s", url, e)
         return False, str(e)
-
-
-def process_message(msg: dict) -> dict:
-    """Process a single message and return the result."""
-    # Extract required fields
-    msg_id = msg.get("id")
-    chat_id = msg.get("chat_id")
-
-    # Validate required fields exist
-    if msg_id is None or chat_id is None:
-        return {
-            "id": msg_id or 0,
-            "chat_id": chat_id or 0,
-            "status": "failed"
-        }
-
-    # Get message text
-    text = msg.get("text", "")
-    if not text:
-        # No text, nothing to process
-        return {
-            "id": msg_id,
-            "chat_id": chat_id,
-            "status": "success"
-        }
-
-    # Extract URLs from text
-    urls = extract_urls(text)
-    if not urls:
-        # No URLs found
-        return {
-            "id": msg_id,
-            "chat_id": chat_id,
-            "status": "success"
-        }
-
-    # Download each URL
-    all_success = True
-    for url in urls:
-        success, _ = download_with_ytdlp(url, DOWNLOAD_DIR)
-        if not success:
-            all_success = False
-
-    return {
-        "id": msg_id,
-        "chat_id": chat_id,
-        "status": "success" if all_success else "failed"
-    }
 
 
 def main():
