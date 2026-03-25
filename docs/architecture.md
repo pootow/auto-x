@@ -113,16 +113,52 @@ True/False
 {"last_message_id": 123, "last_processed_at": "2024-01-15T10:00:00Z"}
 ```
 
-**Bot Mode File**: `~/.tele/state/bot_{chat_id}.json`
+**Bot Mode Files**:
+- `bot_{chat_id}.json` - Offset state
+- `bot_{chat_id}_pending.jsonl` - Messages waiting to be processed
+- `bot_{chat_id}_dead.jsonl` - Failed after 3 retries
 
-```json
-{"last_update_id": 456, "last_processed_at": "2024-01-15T10:00:00Z"}
+**Bot Mode Persistence**:
+
+Messages are persisted to the pending queue before processing. On crash/restart, pending messages are replayed. Processor failures are retried 3 times with exponential backoff (5s, 15s, 45s). After 3 failures, messages go to the dead-letter file for manual retry.
+
+```
+Startup:
+  1. Load pending queue from disk
+  2. Replay pending messages through batcher
+
+Main loop:
+  1. Poll getUpdates(offset)
+  2. For each update: append to pending file → add to batcher
+  3. On batch success: remove from pending file → save offset
+
+Processor crash:
+  1. Increment retry_count
+  2. Schedule retry with backoff
+  3. After 3 retries: move to dead-letter file
+```
+
+**Retry Dead-Letter**:
+
+```bash
+# View dead letters (just cat the file)
+cat ~/.tele/state/bot_123_dead.jsonl
+
+# Retry with original processor
+tele --retry-dead ~/.tele/state/bot_123_dead.jsonl
+
+# Retry with different processor
+tele --retry-dead ~/.tele/state/bot_123_dead.jsonl --exec "new-processor"
 ```
 
 **Logic**:
 - App mode: `min_id = last_message_id`, `reverse=True`
 - Bot mode: `offset = last_update_id + 1`
 - `--full` flag: Ignore state (app mode only)
+
+**Known Limitation - App Mode**:
+
+App mode does not have persistence for piped output. If the app crashes or is killed after outputting messages to stdout but before the downstream processor completes, those messages may be lost. Users can re-run the command to re-fetch messages from Telegram. This limitation is documented and app mode is currently paused in active development.
 
 ### output.py (Serialization)
 

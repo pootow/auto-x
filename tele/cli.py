@@ -32,12 +32,14 @@ from .log import setup_logging, get_logger, get_log_level_name, DATAFLOW
 @click.option('--mark', 'mark_mode', is_flag=True, help='Mark mode (read message IDs from stdin)')
 @click.option('--reaction', '-r', default='👍', help='Reaction emoji for marking (default: 👍)')
 @click.option('--failed-mark', default='👎', help='Failed reaction emoji (bot mode)')
+@click.option('--received-mark', default='👀', help='Reaction when message received (bot mode)')
 @click.option('--config', 'config_path', help='Path to config file')
 @click.option('--batch-size', '-b', default=100, help='Batch size for fetching messages')
 @click.option('--limit', '-l', type=int, help='Maximum number of messages to fetch')
 @click.option('--page-size', default=10, help='Messages per batch (bot mode)')
 @click.option('--interval', default=3.0, help='Debounce interval in seconds (bot mode)')
 @click.option('--exec', 'exec_cmd', help='Command to process messages (bot mode)')
+@click.option('--retry-dead', 'retry_dead', help='Retry dead-letter file (path to .jsonl)')
 @click.option('-v', '--verbose', count=True, help='Increase verbosity (-v, -vv, -vvv, -vvvv)')
 @click.pass_context
 def cli(
@@ -50,12 +52,14 @@ def cli(
     mark_mode: bool,
     reaction: str,
     failed_mark: str,
+    received_mark: str,
     config_path: Optional[str],
     batch_size: int,
     limit: Optional[int],
     page_size: int,
     interval: float,
     exec_cmd: Optional[str],
+    retry_dead: Optional[str],
     verbose: int,
 ) -> None:
     """Telegram message processing pipeline tool.
@@ -112,10 +116,27 @@ def cli(
             filter_expr=filter_expr,
             reaction=reaction,
             failed_mark=failed_mark,
+            received_mark=received_mark,
             page_size=page_size,
             interval=interval,
             exec_cmd=exec_cmd,
             verbose=verbose,
+        ))
+        return
+
+    # Retry dead-letter mode
+    if retry_dead:
+        # Use extra args as exec command if provided via --
+        if extra_args and not exec_cmd:
+            exec_cmd = ' '.join(extra_args)
+        elif extra_args and exec_cmd:
+            exec_cmd = f"{exec_cmd} {' '.join(extra_args)}"
+
+        asyncio.run(run_retry_dead(
+            dead_letter_path=retry_dead,
+            exec_cmd=exec_cmd,
+            reaction=reaction,
+            failed_mark=failed_mark,
         ))
         return
 
@@ -151,12 +172,13 @@ async def run_bot_mode(
     filter_expr: Optional[str],
     reaction: str,
     failed_mark: str,
+    received_mark: str,
     page_size: int,
     interval: float,
     exec_cmd: str,
     verbose: int = 0,
 ) -> None:
-    """Run bot mode daemon loop.
+    """Run bot mode daemon loop with persistence and retry.
 
     Args:
         config: Configuration
@@ -164,11 +186,15 @@ async def run_bot_mode(
         filter_expr: Optional DSL filter expression
         reaction: Success reaction emoji
         failed_mark: Failure reaction emoji
+        received_mark: Reaction when message is received
         page_size: Messages per batch
         interval: Debounce interval
         exec_cmd: Command to process messages
         verbose: Verbosity level
     """
+    from .state import PendingQueue, PendingMessage, DeadLetterQueue, DeadLetter
+    from datetime import datetime, timezone
+
     logger = get_logger("tele.bot")
     if not config.telegram.bot_token:
         raise click.ClickException("TELEGRAM_BOT_TOKEN required for bot mode")
@@ -185,12 +211,73 @@ async def run_bot_mode(
     state_mgr = BotStateManager()
     msg_filter = create_filter(filter_expr) if filter_expr else None
 
+    # State key for pending/offset files
+    state_key = chat_filter if chat_filter else 0
+
+    # Initialize persistence
+    pending_queue = PendingQueue(state_key)
+    dead_letter_path = str(pending_queue._queue_path()).replace('_pending.jsonl', '_dead.jsonl')
+    dead_letter_queue = DeadLetterQueue(dead_letter_path)
+
+    # Retry configuration
+    MAX_RETRIES = 3
+    RETRY_DELAYS = [5, 15, 45]  # seconds
+
     batcher = MessageBatcher(page_size=page_size, interval=interval)
 
-    async def process_batch(messages: List[dict]) -> None:
+    # Track scheduled retries
+    scheduled_retries: dict[int, asyncio.Task] = {}
+
+    async def schedule_retry(pmsg: PendingMessage) -> None:
+        """Schedule a retry with exponential backoff."""
+        retry_count = pmsg.retry_count
+        if retry_count >= MAX_RETRIES:
+            # Move to dead-letter queue
+            logger.warning("Message %s failed after %s retries, moving to dead-letter", pmsg.message_id, MAX_RETRIES)
+            dl = DeadLetter(
+                message_id=pmsg.message_id,
+                chat_id=pmsg.chat_id,
+                message=pmsg.message,
+                exec_cmd=exec_cmd,
+                failed_at=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+                retry_count=retry_count,
+                error="Max retries exceeded",
+            )
+            dead_letter_queue.append(dl)
+            pending_queue.remove([pmsg.message_id])
+            return
+
+        delay = RETRY_DELAYS[retry_count] if retry_count < len(RETRY_DELAYS) else RETRY_DELAYS[-1]
+        logger.info("Scheduling retry %s for message %s in %ss", retry_count + 1, pmsg.message_id, delay)
+
+        await asyncio.sleep(delay)
+
+        # Update retry count and last_attempt
+        pmsg.retry_count = retry_count + 1
+        pmsg.last_attempt = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        pending_queue.update(pmsg)
+
+        # Add back to batcher
+        await batcher.add({
+            'message_id': pmsg.message_id,
+            'chat_id': pmsg.chat_id,
+            'update_id': pmsg.update_id,
+            'message': pmsg.message,
+            'retry_count': pmsg.retry_count,
+            'last_attempt': pmsg.last_attempt,
+        })
+
+    async def process_batch(batch_items: List[dict]) -> None:
         """Process a batch of messages through exec command."""
+        # Extract just the messages for the processor
+        messages = [item['message'] for item in batch_items]
+
         try:
             results = await run_exec_command(exec_cmd, messages, shell=True)
+
+            # Track successful and failed message IDs
+            success_ids = []
+            failed_ids = []  # Non-retriable failures (processor returned failed)
 
             # Mark messages based on status
             for result in results:
@@ -210,24 +297,62 @@ async def run_bot_mode(
                 except Exception as e:
                     logger.error("Failed to mark message %s in chat %s: %s", msg_id, result_chat_id, e)
 
-            # Update offset on success
-            if results:
-                # Get max update_id from the original updates
-                # Note: We need to track update_id separately
-                pass
+                if status == 'success':
+                    success_ids.append(msg_id)
+                else:
+                    # Non-retriable failure (processor explicitly failed it)
+                    failed_ids.append(msg_id)
+
+            # Remove successful and non-retriable failed messages from pending
+            to_remove = success_ids + failed_ids
+            if to_remove:
+                pending_queue.remove(to_remove)
+                logger.debug("Removed %s messages from pending queue", len(to_remove))
+
+            # Update offset based on max update_id from successful batch
+            if batch_items:
+                max_update_id = max(item['update_id'] for item in batch_items if item.get('update_id'))
+                state_mgr.save(state_key, max_update_id)
+                logger.debug("Updated offset to %s", max_update_id)
 
         except Exception as e:
             logger.error("Batch processing failed: %s", e)
 
+            # Schedule retries for all messages in batch
+            for item in batch_items:
+                pmsg = PendingMessage(
+                    message_id=item['message_id'],
+                    chat_id=item['chat_id'],
+                    update_id=item['update_id'],
+                    message=item['message'],
+                    retry_count=item.get('retry_count', 0),
+                    last_attempt=item.get('last_attempt'),
+                )
+                # Cancel any existing retry task
+                if item['message_id'] in scheduled_retries:
+                    scheduled_retries[item['message_id']].cancel()
+                # Schedule new retry
+                scheduled_retries[item['message_id']] = asyncio.create_task(schedule_retry(pmsg))
+
     batcher.on_batch = process_batch
 
-    # Load last offset (use 0 if no chat filter, meaning process all)
-    state_key = chat_filter if chat_filter else 0
+    # Load last offset
     state = state_mgr.load(state_key)
     offset = state.get('last_update_id', 0)
 
-    # Track update_ids for state updates
-    pending_updates: dict = {}
+    # Load and replay pending messages on startup
+    pending_messages = pending_queue.read_all()
+    if pending_messages:
+        logger.info("Replaying %s pending messages from previous session", len(pending_messages))
+        for pmsg in pending_messages:
+            await batcher.add({
+                'message_id': pmsg.message_id,
+                'chat_id': pmsg.chat_id,
+                'update_id': pmsg.update_id,
+                'message': pmsg.message,
+                'retry_count': pmsg.retry_count,
+                'last_attempt': pmsg.last_attempt,
+            })
 
     try:
         if chat_filter:
@@ -255,22 +380,50 @@ async def run_bot_mode(
                 if msg_filter and not msg_filter.matches(message):
                     continue
 
-                # Format message (no status in input)
-                formatted = format_message(message)
-                pending_updates[message.get('message_id')] = update_id
+                msg_id = message.get('message_id')
 
-                # Add to batcher
-                import json
-                await batcher.add(json.loads(formatted))
-                logger.debug("Queued message %s for processing", message.get('message_id'))
+                # Create pending message
+                formatted = json.loads(format_message(message))
+                pmsg = PendingMessage(
+                    message_id=msg_id,
+                    chat_id=msg_chat_id,
+                    update_id=update_id,
+                    message=formatted,
+                    retry_count=0,
+                    last_attempt=None,
+                )
 
-                # Save state after each update
-                state_mgr.save(state_key, update_id)
+                # Append to pending file BEFORE adding to batcher
+                pending_queue.append(pmsg)
+
+                # Add to batcher with metadata
+                await batcher.add({
+                    'message_id': pmsg.message_id,
+                    'chat_id': pmsg.chat_id,
+                    'update_id': pmsg.update_id,
+                    'message': pmsg.message,
+                    'retry_count': pmsg.retry_count,
+                    'last_attempt': pmsg.last_attempt,
+                })
+                logger.debug("Queued message %s for processing", msg_id)
+
+                # Add received reaction
+                if received_mark:
+                    try:
+                        await client.add_reaction(msg_chat_id, msg_id, received_mark)
+                        logger.debug("Added received mark to message %s", msg_id)
+                    except Exception as e:
+                        logger.warning("Failed to add received mark: %s", e)
+
+                # NOTE: Do NOT save offset here - offset is saved only after successful processing
 
     except KeyboardInterrupt:
         logger.info("Shutting down...")
         await batcher.flush_remaining()
     finally:
+        # Cancel any pending retry tasks
+        for task in scheduled_retries.values():
+            task.cancel()
         await client.close()
 
 
@@ -425,6 +578,84 @@ async def run_mark_mode(config, reaction: str) -> None:
     finally:
         logger.debug("Disconnecting from Telegram...")
         await client.disconnect()
+
+
+async def run_retry_dead(
+    dead_letter_path: str,
+    exec_cmd: Optional[str],
+    reaction: str,
+    failed_mark: str,
+) -> None:
+    """Retry dead-letter messages.
+
+    Args:
+        dead_letter_path: Path to dead-letter JSONL file
+        exec_cmd: Command to process messages (uses stored command if not provided)
+        reaction: Success reaction emoji
+        failed_mark: Failure reaction emoji
+    """
+    from .state import DeadLetterQueue
+    from .bot_client import BotClient
+    from .config import load_config
+
+    logger = get_logger("tele.retry")
+    config = load_config()
+
+    if not config.telegram.bot_token:
+        raise click.ClickException("TELEGRAM_BOT_TOKEN required for retry-dead mode")
+
+    dead_queue = DeadLetterQueue(dead_letter_path)
+    entries = dead_queue.read_all()
+
+    if not entries:
+        logger.info("No dead-letter entries found in %s", dead_letter_path)
+        return
+
+    logger.info("Found %s dead-letter entries", len(entries))
+
+    client = BotClient(config.telegram.bot_token)
+
+    try:
+        success_ids = []
+
+        for entry in entries:
+            # Use provided exec_cmd or fall back to stored one
+            cmd = exec_cmd or entry.exec_cmd
+            if not cmd:
+                logger.warning("No command for message %s, skipping", entry.message_id)
+                continue
+
+            try:
+                results = await run_exec_command(cmd, [entry.message], shell=True)
+
+                for result in results:
+                    msg_id = result.get('id')
+                    result_chat_id = result.get('chat_id')
+                    status = result.get('status')
+
+                    if not msg_id or not result_chat_id or not status:
+                        logger.warning("Skipping result: missing id/chat_id/status")
+                        continue
+
+                    emoji = reaction if status == 'success' else failed_mark
+                    await client.add_reaction(result_chat_id, msg_id, emoji)
+
+                    if status == 'success':
+                        success_ids.append(entry.message_id)
+                        logger.info("Successfully retried message %s", msg_id)
+                    else:
+                        logger.warning("Message %s still failed after retry", msg_id)
+
+            except Exception as e:
+                logger.error("Retry failed for message %s: %s", entry.message_id, e)
+
+        # Remove successful retries from dead-letter file
+        if success_ids:
+            dead_queue.remove(success_ids)
+            logger.info("Removed %s successful entries from dead-letter file", len(success_ids))
+
+    finally:
+        await client.close()
 
 
 def main() -> None:

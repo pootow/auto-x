@@ -175,3 +175,213 @@ class BotStateManager:
         }
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(state, f, indent=2)
+
+
+@dataclass
+class PendingMessage:
+    """A message waiting to be processed."""
+    message_id: int
+    chat_id: int
+    update_id: int
+    message: dict
+    retry_count: int = 0
+    last_attempt: Optional[str] = None
+
+
+class PendingQueue:
+    """Manages pending messages for crash recovery."""
+
+    def __init__(self, chat_id: int, state_dir: Optional[str] = None):
+        """Initialize pending queue.
+
+        Args:
+            chat_id: Chat ID this queue is for
+            state_dir: Directory for state files (defaults to ~/.tele/state/)
+        """
+        if state_dir is None:
+            state_dir = os.path.expanduser("~/.tele/state")
+        self.state_dir = Path(state_dir)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.chat_id = chat_id
+
+    def _queue_path(self) -> Path:
+        """Get the path to the pending queue file."""
+        return self.state_dir / f"bot_{self.chat_id}_pending.jsonl"
+
+    def append(self, msg: PendingMessage) -> None:
+        """Append a message to the pending queue.
+
+        Args:
+            msg: PendingMessage to append
+        """
+        path = self._queue_path()
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(asdict(msg)) + '\n')
+
+    def read_all(self) -> list[PendingMessage]:
+        """Read all pending messages.
+
+        Returns:
+            List of PendingMessage objects
+        """
+        path = self._queue_path()
+        if not path.exists():
+            return []
+
+        messages = []
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        data = json.loads(line)
+                        messages.append(PendingMessage(**data))
+                    except json.JSONDecodeError:
+                        continue
+        return messages
+
+    def remove(self, message_ids: list[int]) -> None:
+        """Remove messages by message_id (rewrite file without them).
+
+        Args:
+            message_ids: List of message IDs to remove
+        """
+        if not message_ids:
+            return
+
+        path = self._queue_path()
+        if not path.exists():
+            return
+
+        # Read all, filter out removed ones
+        remaining = []
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        data = json.loads(line)
+                        if data.get('message_id') not in message_ids:
+                            remaining.append(line)
+                    except json.JSONDecodeError:
+                        continue
+
+        # Rewrite file with remaining messages
+        with open(path, 'w', encoding='utf-8') as f:
+            for line in remaining:
+                f.write(line + '\n')
+
+    def update(self, msg: PendingMessage) -> None:
+        """Update a message in the queue (rewrite file).
+
+        Args:
+            msg: PendingMessage to update (matched by message_id)
+        """
+        path = self._queue_path()
+        if not path.exists():
+            return
+
+        # Read all, update matching one
+        lines = []
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        data = json.loads(line)
+                        if data.get('message_id') == msg.message_id:
+                            lines.append(json.dumps(asdict(msg)))
+                        else:
+                            lines.append(line)
+                    except json.JSONDecodeError:
+                        continue
+
+        # Rewrite file
+        with open(path, 'w', encoding='utf-8') as f:
+            for line in lines:
+                f.write(line + '\n')
+
+
+@dataclass
+class DeadLetter:
+    """A message that failed processing after max retries."""
+    message_id: int
+    chat_id: int
+    message: dict
+    exec_cmd: str
+    failed_at: str
+    retry_count: int
+    error: str
+
+
+class DeadLetterQueue:
+    """Manages dead-letter messages for manual retry."""
+
+    def __init__(self, path: str):
+        """Initialize dead-letter queue.
+
+        Args:
+            path: Path to the dead-letter file
+        """
+        self.path = Path(path)
+
+    def append(self, dl: DeadLetter) -> None:
+        """Append a dead-letter entry.
+
+        Args:
+            dl: DeadLetter to append
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(asdict(dl)) + '\n')
+
+    def read_all(self) -> list[DeadLetter]:
+        """Read all dead-letter entries.
+
+        Returns:
+            List of DeadLetter objects
+        """
+        if not self.path.exists():
+            return []
+
+        entries = []
+        with open(self.path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        data = json.loads(line)
+                        entries.append(DeadLetter(**data))
+                    except json.JSONDecodeError:
+                        continue
+        return entries
+
+    def remove(self, message_ids: list[int]) -> None:
+        """Remove entries by message_id (rewrite file without them).
+
+        Args:
+            message_ids: List of message IDs to remove
+        """
+        if not message_ids:
+            return
+
+        if not self.path.exists():
+            return
+
+        # Read all, filter out removed ones
+        remaining = []
+        with open(self.path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        data = json.loads(line)
+                        if data.get('message_id') not in message_ids:
+                            remaining.append(line)
+                    except json.JSONDecodeError:
+                        continue
+
+        # Rewrite file with remaining entries
+        with open(self.path, 'w', encoding='utf-8') as f:
+            for line in remaining:
+                f.write(line + '\n')
