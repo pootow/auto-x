@@ -1,8 +1,11 @@
 """Bot API client for Telegram operations."""
 
+import asyncio
 import logging
 import aiohttp
 from typing import Optional, List, Dict, Any
+
+from .retry import retry_async
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +39,13 @@ class BotClient:
             logger.debug("Closing HTTP session")
             await self._session.close()
 
-    async def _call_api(self, method: str, params: dict = None) -> dict:
-        """Call Bot API method.
+    async def _reset_session(self) -> None:
+        """Reset HTTP session (used after persistent failures)."""
+        await self.close()
+        logger.debug("HTTP session reset")
+
+    async def _call_api_internal(self, method: str, params: dict = None) -> dict:
+        """Internal API call without retry (used by retry wrapper).
 
         Args:
             method: API method name
@@ -47,7 +55,8 @@ class BotClient:
             API response data
 
         Raises:
-            RuntimeError: If API call fails
+            aiohttp.ClientError: Network/HTTP errors
+            RuntimeError: If API returns error response
         """
         session = await self._get_session()
         url = self.API_BASE.format(token=self.token, method=method)
@@ -61,6 +70,32 @@ class BotClient:
                 raise RuntimeError(f"API error: {data.get('description')}")
             logger.debug("API call successful: %s", method)
             return data.get("result", {})
+
+    async def _call_api(self, method: str, params: dict = None) -> dict:
+        """Call Bot API method with automatic retry on transient failures.
+
+        Args:
+            method: API method name
+            params: Method parameters
+
+        Returns:
+            API response data
+
+        Raises:
+            RuntimeError: If API call fails after all retries
+        """
+        try:
+            return await retry_async(
+                self._call_api_internal,
+                method,
+                params,
+                retry_exceptions=(aiohttp.ClientError, asyncio.TimeoutError),
+            )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            # Reset session on persistent failures
+            logger.warning("API call failed after retries, resetting session: %s", e)
+            await self._reset_session()
+            raise RuntimeError(f"API call failed: {e}") from e
 
     async def poll_updates(self, offset: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
         """Poll for new updates using long polling.

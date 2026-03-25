@@ -1,5 +1,6 @@
 """Telethon client wrapper for Telegram API operations."""
 
+import asyncio
 import logging
 import os
 from typing import Optional, Union, List, AsyncIterator
@@ -8,6 +9,9 @@ from telethon import TelegramClient
 from telethon.tl.types import InputPeerUser, InputPeerChat, InputPeerChannel, PeerUser, PeerChat, PeerChannel
 from telethon.tl.functions.messages import SearchRequest
 from telethon.tl.types import InputMessagesFilterEmpty
+from telethon.errors import RPCError
+
+from .retry import retry_async
 
 logger = logging.getLogger(__name__)
 
@@ -233,13 +237,32 @@ class TeleClient:
         ):
             yield message
 
+    async def _add_reaction_internal(
+        self,
+        peer,
+        message_id: int,
+        emoji: str,
+    ) -> bool:
+        """Internal method to add reaction (retriable).
+
+        Args:
+            peer: Resolved input peer
+            message_id: ID of the message
+            emoji: Emoji to react with
+
+        Returns:
+            True if successful
+        """
+        await self.client.send_reaction(peer, message_id, emoji)
+        return True
+
     async def add_reaction(
         self,
         chat: Union[str, int],
         message_id: int,
         emoji: str = "✅",
     ) -> bool:
-        """Add a reaction to a message.
+        """Add a reaction to a message with retry.
 
         Args:
             chat: Chat name, username, or ID
@@ -250,9 +273,14 @@ class TeleClient:
             True if successful
         """
         peer = await self.resolve_chat(chat)
-        await self.client.send_reaction(peer, message_id, emoji)
-        logger.debug("Added reaction %s to message %s", emoji, message_id)
-        return True
+        logger.debug("Adding reaction %s to message %s", emoji, message_id)
+        return await retry_async(
+            self._add_reaction_internal,
+            peer,
+            message_id,
+            emoji,
+            retry_exceptions=(RPCError, asyncio.TimeoutError),
+        )
 
     async def get_dialogs(self) -> List:
         """Get all dialogs (chats).
