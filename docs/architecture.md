@@ -116,11 +116,30 @@ True/False
 **Bot Mode Files**:
 - `bot_{chat_id}.json` - Offset state
 - `bot_{chat_id}_pending.jsonl` - Messages waiting to be processed
-- `bot_{chat_id}_dead.jsonl` - Failed after 3 retries
+- `bot_{chat_id}_dead.jsonl` - Retriable errors after 3 retries
+- `bot_{chat_id}_fatal.jsonl` - Fatal errors (no retry value)
+
+**Processor Status Values**:
+
+| Status | Meaning | Action |
+|--------|---------|--------|
+| `success` | Processed successfully | Remove from pending, mark ✅ |
+| `error` | Retriable failure | Retry up to 3 times, then dead-letter |
+| `fatal` | Non-retriable, no value | Remove from pending, log to fatal.jsonl, mark 👎 |
+
+**Examples of `fatal`**:
+- Resource 404 (link expired, file deleted)
+- Invalid message format
+- Business logic rejection
+
+**Examples of `error`**:
+- Network timeout
+- External service temporarily unavailable
+- Rate limited
 
 **Bot Mode Persistence**:
 
-Messages are persisted to the pending queue before processing. On crash/restart, pending messages are replayed. Processor failures are retried 3 times with exponential backoff (5s, 15s, 45s). After 3 failures, messages go to the dead-letter file for manual retry.
+Messages are persisted to the pending queue before processing. On crash/restart, pending messages are replayed. Processor failures (status: error) are retried 3 times with exponential backoff (5s, 15s, 45s). After 3 failures, messages go to the dead-letter file for manual retry.
 
 ```
 Startup:
@@ -132,6 +151,11 @@ Main loop:
   2. For each update: append to pending file → add to batcher
   3. On batch success: remove from pending file → save offset
 
+Processor returns:
+  - status: success → Remove from pending, mark ✅
+  - status: error   → Retry with backoff, then dead-letter
+  - status: fatal   → Remove from pending, fatal.jsonl, mark 👎
+
 Processor crash:
   1. Increment retry_count
   2. Schedule retry with backoff
@@ -141,10 +165,13 @@ Processor crash:
 **Retry Dead-Letter**:
 
 ```bash
-# View dead letters (just cat the file)
+# View dead letters (retriable errors that exhausted retries)
 cat ~/.tele/state/bot_123_dead.jsonl
 
-# Retry with original processor
+# View fatal errors (no retry value)
+cat ~/.tele/state/bot_123_fatal.jsonl
+
+# Retry dead letters with original processor
 tele --retry-dead ~/.tele/state/bot_123_dead.jsonl
 
 # Retry with different processor

@@ -71,9 +71,9 @@ async def run_exec_command(
                 result = json.loads(line)
                 # Must have id and chat_id at minimum
                 if 'id' in result and 'chat_id' in result:
-                    # Default to failed if no status
+                    # Default to error (retriable) if no status
                     if 'status' not in result:
-                        result['status'] = 'failed'
+                        result['status'] = 'error'
                     results.append(result)
                     logger.debug("Parsed result: id=%s status=%s", result.get('id'), result.get('status'))
             except json.JSONDecodeError:

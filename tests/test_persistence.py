@@ -1,4 +1,4 @@
-"""Tests for persistence classes (PendingQueue, DeadLetterQueue)."""
+"""Tests for persistence classes (PendingQueue, DeadLetterQueue, FatalQueue)."""
 
 import json
 import tempfile
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tele.state import PendingMessage, PendingQueue, DeadLetter, DeadLetterQueue
+from tele.state import PendingMessage, PendingQueue, DeadLetter, DeadLetterQueue, FatalError, FatalQueue
 
 
 class TestPendingMessage:
@@ -252,6 +252,72 @@ class TestDeadLetterQueue:
                 failed_at="2024-01-15T10:00:00Z",
                 retry_count=3,
                 error="Error",
+            ))
+
+            assert path.exists()
+
+
+class TestFatalError:
+    """Tests for FatalError dataclass."""
+
+    def test_create_fatal_error(self):
+        """Test creating a fatal error."""
+        fe = FatalError(
+            message_id=123,
+            chat_id=456,
+            message={"id": 123, "text": "hello"},
+            exec_cmd="processor --arg value",
+            failed_at="2024-01-15T10:00:00Z",
+            reason="Resource 404",
+        )
+        assert fe.message_id == 123
+        assert fe.exec_cmd == "processor --arg value"
+        assert fe.reason == "Resource 404"
+
+
+class TestFatalQueue:
+    """Tests for FatalQueue."""
+
+    def test_append_and_read(self, tmp_path):
+        """Test appending and reading fatal errors."""
+        path = tmp_path / "bot_123_fatal.jsonl"
+        queue = FatalQueue(str(path))
+
+        fe = FatalError(
+            message_id=1,
+            chat_id=123,
+            message={"id": 1},
+            exec_cmd="processor",
+            failed_at="2024-01-15T10:00:00Z",
+            reason="Resource 404",
+        )
+        queue.append(fe)
+
+        entries = queue.read_all()
+        assert len(entries) == 1
+        assert entries[0].message_id == 1
+        assert entries[0].reason == "Resource 404"
+
+    def test_read_empty_queue(self, tmp_path):
+        """Test reading from empty queue."""
+        path = tmp_path / "bot_123_fatal.jsonl"
+        queue = FatalQueue(str(path))
+        entries = queue.read_all()
+        assert entries == []
+
+    def test_creates_parent_directory(self):
+        """Test that parent directory is created."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "subdir" / "fatal.jsonl"
+            queue = FatalQueue(str(path))
+
+            queue.append(FatalError(
+                message_id=1,
+                chat_id=123,
+                message={},
+                exec_cmd="processor",
+                failed_at="2024-01-15T10:00:00Z",
+                reason="Error",
             ))
 
             assert path.exists()

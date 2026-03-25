@@ -192,7 +192,7 @@ async def run_bot_mode(
         exec_cmd: Command to process messages
         verbose: Verbosity level
     """
-    from .state import PendingQueue, PendingMessage, DeadLetterQueue, DeadLetter
+    from .state import PendingQueue, PendingMessage, DeadLetterQueue, DeadLetter, FatalQueue, FatalError
     from datetime import datetime, timezone
 
     logger = get_logger("tele.bot")
@@ -218,6 +218,8 @@ async def run_bot_mode(
     pending_queue = PendingQueue(state_key)
     dead_letter_path = str(pending_queue._queue_path()).replace('_pending.jsonl', '_dead.jsonl')
     dead_letter_queue = DeadLetterQueue(dead_letter_path)
+    fatal_path = str(pending_queue._queue_path()).replace('_pending.jsonl', '_fatal.jsonl')
+    fatal_queue = FatalQueue(fatal_path)
 
     # Retry configuration
     MAX_RETRIES = 3
@@ -275,9 +277,11 @@ async def run_bot_mode(
         try:
             results = await run_exec_command(exec_cmd, messages, shell=True)
 
-            # Track successful and failed message IDs
+            # Track message IDs by status
             success_ids = []
-            failed_ids = []  # Non-retriable failures (processor returned failed)
+            error_ids = []   # Retriable errors - will be handled by exception path
+            fatal_ids = []   # Non-retriable, no value in reprocessing
+            fatal_reasons = {}  # message_id -> reason for fatal errors
 
             # Mark messages based on status
             for result in results:
@@ -290,26 +294,64 @@ async def run_bot_mode(
                     logger.warning("Skipping result: missing id/chat_id/status: %s", result)
                     continue
 
-                emoji = reaction if status == 'success' else failed_mark
+                # Determine emoji based on status
+                if status == 'success':
+                    emoji = reaction
+                    success_ids.append(msg_id)
+                elif status == 'fatal':
+                    emoji = failed_mark
+                    fatal_ids.append(msg_id)
+                    fatal_reasons[msg_id] = result.get('reason', 'Processor returned fatal status')
+                else:  # 'error' or unknown - treat as retriable
+                    emoji = failed_mark
+                    error_ids.append(msg_id)
+
                 try:
                     await client.add_reaction(result_chat_id, msg_id, emoji)
                     logger.debug("Marked message %s in chat %s with %s", msg_id, result_chat_id, emoji)
                 except Exception as e:
                     logger.error("Failed to mark message %s in chat %s: %s", msg_id, result_chat_id, e)
 
-                if status == 'success':
-                    success_ids.append(msg_id)
-                else:
-                    # Non-retriable failure (processor explicitly failed it)
-                    failed_ids.append(msg_id)
+            # Handle fatal errors - append to fatal.jsonl
+            if fatal_ids:
+                for item in batch_items:
+                    if item['message_id'] in fatal_ids:
+                        fe = FatalError(
+                            message_id=item['message_id'],
+                            chat_id=item['chat_id'],
+                            message=item['message'],
+                            exec_cmd=exec_cmd,
+                            failed_at=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+                            reason=fatal_reasons.get(item['message_id'], 'Processor returned fatal status'),
+                        )
+                        fatal_queue.append(fe)
+                        logger.warning("Message %s marked as fatal, no retry value", item['message_id'])
 
-            # Remove successful and non-retriable failed messages from pending
-            to_remove = success_ids + failed_ids
+            # Remove successful and fatal messages from pending
+            to_remove = success_ids + fatal_ids
             if to_remove:
                 pending_queue.remove(to_remove)
                 logger.debug("Removed %s messages from pending queue", len(to_remove))
 
-            # Update offset based on max update_id from successful batch
+            # Handle error status - schedule retry
+            if error_ids:
+                for item in batch_items:
+                    if item['message_id'] in error_ids:
+                        pmsg = PendingMessage(
+                            message_id=item['message_id'],
+                            chat_id=item['chat_id'],
+                            update_id=item['update_id'],
+                            message=item['message'],
+                            retry_count=item.get('retry_count', 0),
+                            last_attempt=item.get('last_attempt'),
+                        )
+                        # Cancel any existing retry task
+                        if item['message_id'] in scheduled_retries:
+                            scheduled_retries[item['message_id']].cancel()
+                        # Schedule new retry
+                        scheduled_retries[item['message_id']] = asyncio.create_task(schedule_retry(pmsg))
+
+            # Update offset based on max update_id from batch
             if batch_items:
                 max_update_id = max(item['update_id'] for item in batch_items if item.get('update_id'))
                 state_mgr.save(state_key, max_update_id)
@@ -318,7 +360,7 @@ async def run_bot_mode(
         except Exception as e:
             logger.error("Batch processing failed: %s", e)
 
-            # Schedule retries for all messages in batch
+            # Schedule retries for all messages in batch (processor crashed)
             for item in batch_items:
                 pmsg = PendingMessage(
                     message_id=item['message_id'],

@@ -385,3 +385,57 @@ class DeadLetterQueue:
         with open(self.path, 'w', encoding='utf-8') as f:
             for line in remaining:
                 f.write(line + '\n')
+
+
+@dataclass
+class FatalError:
+    """A message that encountered a fatal error (no retry value)."""
+    message_id: int
+    chat_id: int
+    message: dict
+    exec_cmd: str
+    failed_at: str
+    reason: str
+
+
+class FatalQueue:
+    """Manages fatal errors for logging/analysis."""
+
+    def __init__(self, path: str):
+        """Initialize fatal queue.
+
+        Args:
+            path: Path to the fatal errors file
+        """
+        self.path = Path(path)
+
+    def append(self, fe: FatalError) -> None:
+        """Append a fatal error entry.
+
+        Args:
+            fe: FatalError to append
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(asdict(fe)) + '\n')
+
+    def read_all(self) -> list[FatalError]:
+        """Read all fatal error entries.
+
+        Returns:
+            List of FatalError objects
+        """
+        if not self.path.exists():
+            return []
+
+        entries = []
+        with open(self.path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        data = json.loads(line)
+                        entries.append(FatalError(**data))
+                    except json.JSONDecodeError:
+                        continue
+        return entries

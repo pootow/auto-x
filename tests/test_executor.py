@@ -42,8 +42,8 @@ for line in sys.stdin:
             os.unlink(script_path)
 
     @pytest.mark.asyncio
-    async def test_exec_command_defaults_to_failed(self):
-        """Processor output without status should default to failed."""
+    async def test_exec_command_defaults_to_error(self):
+        """Processor output without status should default to error (retriable)."""
         messages = [{"id": 1, "chat_id": 123, "text": "test"}]
 
         # Create a processor that outputs without status
@@ -53,7 +53,7 @@ import sys
 import json
 for line in sys.stdin:
     msg = json.loads(line)
-    # Output without status - should default to failed
+    # Output without status - should default to error (retriable)
     print(json.dumps({"id": msg["id"], "chat_id": msg["chat_id"]}))
 ''')
             script_path = f.name
@@ -62,7 +62,7 @@ for line in sys.stdin:
             result = await run_exec_command(f"python {script_path}", messages, shell=True)
 
             assert len(result) == 1
-            assert result[0]["status"] == "failed"
+            assert result[0]["status"] == "error"
         finally:
             os.unlink(script_path)
 

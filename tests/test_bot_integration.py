@@ -13,7 +13,7 @@ from tele.bot_client import BotClient
 from tele.batcher import MessageBatcher
 from tele.executor import run_exec_command
 from tele.output import format_message
-from tele.state import PendingQueue, PendingMessage, DeadLetterQueue, DeadLetter
+from tele.state import PendingQueue, PendingMessage, DeadLetterQueue, DeadLetter, FatalQueue, FatalError
 
 
 def make_update(update_id: int, message_id: int, chat_id: int = 456, text: str = "test") -> dict:
@@ -426,26 +426,39 @@ class TestPersistenceIntegration:
             assert len(pending_queue.read_all()) == 1
 
     @pytest.mark.asyncio
-    async def test_non_retriable_failure_marked_but_not_retried(self):
-        """Test that processor returning status=failed is not retried."""
+    async def test_fatal_status_not_retried_goes_to_fatal_queue(self):
+        """Test that processor returning status=fatal is not retried and goes to fatal queue."""
         with tempfile.TemporaryDirectory() as tmpdir:
             pending_queue = PendingQueue(chat_id=456, state_dir=tmpdir)
             dead_path = str(Path(tmpdir) / "bot_456_dead.jsonl")
             dead_queue = DeadLetterQueue(dead_path)
+            fatal_path = str(Path(tmpdir) / "bot_456_fatal.jsonl")
+            fatal_queue = FatalQueue(fatal_path)
 
-            async def failing_processor(messages):
-                # Processor explicitly returns failed (non-retriable)
-                return [{"id": m["id"], "chat_id": m["chat_id"], "status": "failed"} for m in messages]
+            async def fatal_processor(messages):
+                # Processor explicitly returns fatal (no retry value)
+                return [{"id": m["id"], "chat_id": m["chat_id"], "status": "fatal", "reason": "Resource 404"} for m in messages]
 
             batcher = MessageBatcher(page_size=1, interval=0.1)
 
             async def process_batch(items):
                 messages = [item["message"] for item in items]
-                results = await failing_processor(messages)
-                # Both success and non-retriable failed should be removed from pending
-                to_remove = [r["id"] for r in results]
-                pending_queue.remove(to_remove)
-                # Non-retriable failures don't go to dead-letter either
+                results = await fatal_processor(messages)
+                # Fatal messages should be removed from pending
+                fatal_ids = [r["id"] for r in results if r.get("status") == "fatal"]
+                if fatal_ids:
+                    for item in items:
+                        if item["message_id"] in fatal_ids:
+                            fe = FatalError(
+                                message_id=item["message_id"],
+                                chat_id=item["chat_id"],
+                                message=item["message"],
+                                exec_cmd="processor",
+                                failed_at="2024-01-15T10:00:00Z",
+                                reason="Resource 404",
+                            )
+                            fatal_queue.append(fe)
+                pending_queue.remove(fatal_ids)
 
             batcher.on_batch = process_batch
 
@@ -467,5 +480,160 @@ class TestPersistenceIntegration:
 
             # Message should be removed from pending (not scheduled for retry)
             assert len(pending_queue.read_all()) == 0
-            # Message should NOT be in dead-letter (non-retriable failure)
+            # Message should NOT be in dead-letter
+            assert len(dead_queue.read_all()) == 0
+            # Message should be in fatal queue
+            fatal_entries = fatal_queue.read_all()
+            assert len(fatal_entries) == 1
+            assert fatal_entries[0].message_id == 100
+            assert fatal_entries[0].reason == "Resource 404"
+
+    @pytest.mark.asyncio
+    async def test_error_status_triggers_retry(self):
+        """Test that processor returning status=error triggers retry logic."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pending_queue = PendingQueue(chat_id=456, state_dir=tmpdir)
+            dead_path = str(Path(tmpdir) / "bot_456_dead.jsonl")
+            dead_queue = DeadLetterQueue(dead_path)
+
+            call_count = 0
+
+            async def error_processor(messages):
+                nonlocal call_count
+                call_count += 1
+                # Processor returns error (retriable)
+                return [{"id": m["id"], "chat_id": m["chat_id"], "status": "error"} for m in messages]
+
+            batcher = MessageBatcher(page_size=1, interval=0.1)
+            retry_count = 0
+            MAX_RETRIES = 3
+
+            async def process_batch(items):
+                nonlocal retry_count
+                messages = [item["message"] for item in items]
+                results = await error_processor(messages)
+                # Error status should trigger retry
+                for item in items:
+                    pmsg = PendingMessage(
+                        message_id=item["message_id"],
+                        chat_id=item["chat_id"],
+                        update_id=item["update_id"],
+                        message=item["message"],
+                        retry_count=item.get("retry_count", 0),
+                    )
+                    retry_count += 1
+                    pmsg.retry_count = retry_count
+                    if retry_count >= MAX_RETRIES:
+                        # Move to dead-letter
+                        dead_queue.append(DeadLetter(
+                            message_id=pmsg.message_id,
+                            chat_id=pmsg.chat_id,
+                            message=pmsg.message,
+                            exec_cmd="processor",
+                            failed_at="2024-01-15T10:00:00Z",
+                            retry_count=retry_count,
+                            error="Max retries",
+                        ))
+                        pending_queue.remove([pmsg.message_id])
+
+            batcher.on_batch = process_batch
+
+            msg = PendingMessage(
+                message_id=100,
+                chat_id=456,
+                update_id=1,
+                message={"id": 100, "chat_id": 456, "text": "test"},
+            )
+            pending_queue.append(msg)
+            await batcher.add({
+                "message_id": msg.message_id,
+                "chat_id": msg.chat_id,
+                "update_id": msg.update_id,
+                "message": msg.message,
+            })
+
+            await asyncio.sleep(0.2)
+
+            # Error should have been processed
+            assert call_count == 1
+            assert retry_count == 1
+
+    @pytest.mark.asyncio
+    async def test_three_status_distinction(self):
+        """Test that success, error, and fatal are handled differently."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pending_queue = PendingQueue(chat_id=456, state_dir=tmpdir)
+            dead_path = str(Path(tmpdir) / "bot_456_dead.jsonl")
+            dead_queue = DeadLetterQueue(dead_path)
+            fatal_path = str(Path(tmpdir) / "bot_456_fatal.jsonl")
+            fatal_queue = FatalQueue(fatal_path)
+
+            results_log = []
+
+            async def three_status_processor(messages):
+                # Return different statuses for different messages
+                results = []
+                for m in messages:
+                    status = m.get("_expected_status", "success")
+                    results.append({"id": m["id"], "chat_id": m["chat_id"], "status": status, "reason": f"{status} reason"})
+                return results
+
+            batcher = MessageBatcher(page_size=3, interval=0.1)
+
+            async def process_batch(items):
+                messages = [item["message"] for item in items]
+                results = await three_status_processor(messages)
+                results_log.extend(results)
+
+                success_ids = []
+                fatal_ids = []
+
+                for r in results:
+                    if r["status"] == "success":
+                        success_ids.append(r["id"])
+                    elif r["status"] == "fatal":
+                        fatal_ids.append(r["id"])
+                        # Append to fatal queue
+                        for item in items:
+                            if item["message_id"] == r["id"]:
+                                fatal_queue.append(FatalError(
+                                    message_id=item["message_id"],
+                                    chat_id=item["chat_id"],
+                                    message=item["message"],
+                                    exec_cmd="processor",
+                                    failed_at="2024-01-15T10:00:00Z",
+                                    reason=r.get("reason", ""),
+                                ))
+
+                pending_queue.remove(success_ids + fatal_ids)
+
+            batcher.on_batch = process_batch
+
+            # Add three messages with different expected statuses
+            for i, status in enumerate(["success", "error", "fatal"]):
+                msg = PendingMessage(
+                    message_id=100 + i,
+                    chat_id=456,
+                    update_id=1 + i,
+                    message={"id": 100 + i, "chat_id": 456, "text": f"msg{i}", "_expected_status": status},
+                )
+                pending_queue.append(msg)
+                await batcher.add({
+                    "message_id": msg.message_id,
+                    "chat_id": msg.chat_id,
+                    "update_id": msg.update_id,
+                    "message": msg.message,
+                })
+
+            await asyncio.sleep(0.2)
+
+            # Check results
+            assert len(results_log) == 3
+            # Success and fatal should be removed from pending
+            remaining = pending_queue.read_all()
+            assert len(remaining) == 1
+            assert remaining[0].message_id == 101  # error status message
+            # Fatal should be in fatal queue
+            assert len(fatal_queue.read_all()) == 1
+            # Nothing in dead-letter yet
             assert len(dead_queue.read_all()) == 0
