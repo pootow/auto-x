@@ -14,6 +14,7 @@ class TelegramConfig:
     api_id: Optional[int] = None
     api_hash: Optional[str] = None
     bot_token: Optional[str] = None
+    bot_api_endpoint: str = "api.telegram.org"
     session_name: str = "tele_tool"
 
 
@@ -48,6 +49,7 @@ class Config:
             api_id=telegram_data.get('api_id'),
             api_hash=telegram_data.get('api_hash'),
             bot_token=telegram_data.get('bot_token'),
+            bot_api_endpoint=telegram_data.get('bot_api_endpoint', 'api.telegram.org'),
             session_name=telegram_data.get('session_name', 'tele_tool'),
         )
 
@@ -70,6 +72,7 @@ class Config:
                 'api_id': self.telegram.api_id,
                 'api_hash': self.telegram.api_hash,
                 'bot_token': self.telegram.bot_token,
+                'bot_api_endpoint': self.telegram.bot_api_endpoint,
                 'session_name': self.telegram.session_name,
             },
             'defaults': {

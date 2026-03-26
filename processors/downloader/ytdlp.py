@@ -161,6 +161,44 @@ def select_best_format(formats: list[dict]) -> dict | None:
     return max(candidates, key=lambda f: f.get("filesize_approx", 0))
 
 
+def get_actual_filesize(url: str) -> int | None:
+    """Get actual file size via HTTP HEAD request.
+
+    Returns content-length if available, None if request fails or header missing.
+    Uses a short timeout to avoid blocking the pipeline.
+
+    Args:
+        url: The media URL to check.
+
+    Returns:
+        File size in bytes, or None if unable to determine.
+    """
+    import urllib.request
+    import urllib.error
+
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        # Add common headers to improve compatibility
+        req.add_header("User-Agent", "Mozilla/5.0")
+
+        with urllib.request.urlopen(req, timeout=10) as response:
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                return int(content_length)
+            logger.debug("No Content-Length header for %s", url)
+            return None
+
+    except urllib.error.HTTPError as e:
+        logger.debug("HEAD request failed for %s: HTTP %d", url, e.code)
+        return None
+    except urllib.error.URLError as e:
+        logger.debug("HEAD request failed for %s: %s", url, e.reason)
+        return None
+    except Exception as e:
+        logger.debug("HEAD request error for %s: %s", url, e)
+        return None
+
+
 def load_template() -> str:
     """Load reply template from file."""
     template_path = Path(__file__).parent / "reply_template.md"
@@ -322,10 +360,21 @@ def process_metadata_mode(urls: list[str]) -> tuple[str, list[dict]]:
                     logger.warning("No formats with filesize_approx for %s", url)
                     return "fatal", []
 
-                filesize = best_format.get("filesize_approx", 0)
                 media_type = "video" if info.get("_type") == "video" else "audio"
                 media_url = best_format.get("url", "")
                 thumbnail = info.get("thumbnail", "")
+
+                # Get actual file size via HEAD request for accurate threshold check
+                # filesize_approx is unreliable for absolute size (only good for relative comparison)
+                actual_size = get_actual_filesize(media_url)
+                if actual_size is not None:
+                    logger.debug("HEAD content-length: %d bytes for %s", actual_size, url)
+                    filesize = actual_size
+                else:
+                    # Fallback to filesize_approx (may be inaccurate)
+                    filesize = best_format.get("filesize_approx", 0)
+                    if filesize:
+                        logger.warning("Using filesize_approx (%d bytes) for %s", filesize, url)
 
                 # Small video -> return URL, large video -> download and return thumbnail
                 if filesize <= MAX_TG_VIDEO_SIZE:

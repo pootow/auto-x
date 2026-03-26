@@ -13,16 +13,18 @@ logger = logging.getLogger(__name__)
 class BotClient:
     """Bot API client using HTTP long polling."""
 
-    API_BASE = "https://api.telegram.org/bot{token}/{method}"
+    API_BASE = "https://{api_endpoint}/bot{token}/{method}"
 
-    def __init__(self, token: str, timeout: int = 30):
+    def __init__(self, token: str, api_endpoint: str = "api.telegram.org", timeout: int = 30):
         """Initialize Bot API client.
 
         Args:
             token: Bot token from @BotFather
+            api_endpoint: API endpoint URL (default: "api.telegram.org")
             timeout: Long polling timeout in seconds
         """
         self.token = token
+        self.api_endpoint = api_endpoint
         self.timeout = timeout
         self._session: Optional[aiohttp.ClientSession] = None
 
@@ -59,15 +61,17 @@ class BotClient:
             RuntimeError: If API returns error response
         """
         session = await self._get_session()
-        url = self.API_BASE.format(token=self.token, method=method)
+        url = self.API_BASE.format(api_endpoint=self.api_endpoint, token=self.token, method=method)
         logger.debug("Calling API method: %s with params: %s", method, params)
 
         async with session.post(url, json=params or {}) as response:
-            response.raise_for_status()
+            # Parse response body first to capture Telegram's error description
             data = await response.json()
             if not data.get("ok"):
-                logger.error("API error: %s", data.get('description'))
-                raise RuntimeError(f"API error: {data.get('description')}")
+                error_desc = data.get('description', 'Unknown error')
+                error_code = data.get('error_code', response.status)
+                logger.error("API error %s: %s", error_code, error_desc)
+                raise RuntimeError(f"API error: {error_desc}")
             logger.debug("API call successful: %s", method)
             return data.get("result", {})
 

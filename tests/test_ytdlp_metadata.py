@@ -165,3 +165,87 @@ class TestSmallLargeVideoLogic:
 
         # 50MB should be the threshold
         assert MAX_TG_VIDEO_SIZE == 50 * 1024 * 1024
+
+
+class TestGetActualFilesize:
+    """Test cases for HTTP HEAD file size detection."""
+
+    def test_get_actual_filesize_success(self):
+        """Test successful HEAD request returning content-length."""
+        import sys
+        import urllib.request
+        sys.path.insert(0, str(Path(__file__).parent.parent / "processors" / "downloader"))
+        from ytdlp import get_actual_filesize
+
+        mock_response = MagicMock()
+        mock_response.headers = {"Content-Length": "52428800"}  # 50MB
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(urllib.request, 'urlopen', return_value=mock_response):
+            result = get_actual_filesize("http://example.com/video.mp4")
+            assert result == 52428800
+
+    def test_get_actual_filesize_no_content_length(self):
+        """Test HEAD request without content-length header returns None."""
+        import sys
+        import urllib.request
+        sys.path.insert(0, str(Path(__file__).parent.parent / "processors" / "downloader"))
+        from ytdlp import get_actual_filesize
+
+        mock_response = MagicMock()
+        mock_response.headers = {}
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(urllib.request, 'urlopen', return_value=mock_response):
+            result = get_actual_filesize("http://example.com/video.mp4")
+            assert result is None
+
+    def test_get_actual_filesize_http_error(self):
+        """Test HEAD request with HTTP error returns None."""
+        import sys
+        import urllib.request
+        import urllib.error
+        sys.path.insert(0, str(Path(__file__).parent.parent / "processors" / "downloader"))
+        from ytdlp import get_actual_filesize
+
+        with patch.object(urllib.request, 'urlopen',
+                          side_effect=urllib.error.HTTPError("http://example.com", 404, "Not Found", {}, None)):
+            result = get_actual_filesize("http://example.com/video.mp4")
+            assert result is None
+
+    def test_get_actual_filesize_url_error(self):
+        """Test HEAD request with URL error returns None."""
+        import sys
+        import urllib.request
+        import urllib.error
+        sys.path.insert(0, str(Path(__file__).parent.parent / "processors" / "downloader"))
+        from ytdlp import get_actual_filesize
+
+        with patch.object(urllib.request, 'urlopen',
+                          side_effect=urllib.error.URLError("Connection refused")):
+            result = get_actual_filesize("http://example.com/video.mp4")
+            assert result is None
+
+    def test_get_actual_filesize_uses_head_method(self):
+        """Test that HEAD method is used, not GET."""
+        import sys
+        import urllib.request
+        sys.path.insert(0, str(Path(__file__).parent.parent / "processors" / "downloader"))
+        from ytdlp import get_actual_filesize
+
+        captured_request = None
+
+        def capture_request(req, *args, **kwargs):
+            nonlocal captured_request
+            captured_request = req
+            mock_response = MagicMock()
+            mock_response.headers = {"Content-Length": "1000"}
+            mock_response.__enter__ = MagicMock(return_value=mock_response)
+            mock_response.__exit__ = MagicMock(return_value=False)
+            return mock_response
+
+        with patch.object(urllib.request, 'urlopen', capture_request):
+            get_actual_filesize("http://example.com/video.mp4")
+            assert captured_request.method == "HEAD"
