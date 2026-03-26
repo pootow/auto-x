@@ -412,7 +412,11 @@ def process_metadata_mode(urls: list[str]) -> tuple[str, list[dict]]:
                     "text": text,
                     "media": {
                         "type": media_type,
-                        "url": media_url
+                        "url": media_url,
+                        "cover": info.get("thumbnail", ""),  # yt-dlp: thumbnail → TG API: cover
+                        "duration": int(info.get("duration", 0) or 0),
+                        "width": info.get("width", 0),
+                        "height": info.get("height", 0),
                     }
                 })
 

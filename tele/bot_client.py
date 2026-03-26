@@ -151,7 +151,11 @@ class BotClient:
         chat_id: int,
         video: str,
         caption: Optional[str] = None,
-        reply_to_message_id: Optional[int] = None
+        reply_to_message_id: Optional[int] = None,
+        cover: Optional[str] = None,
+        duration: Optional[int] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None
     ) -> dict:
         """Send a video by URL.
 
@@ -160,6 +164,10 @@ class BotClient:
             video: Video URL or file_id
             caption: Optional caption
             reply_to_message_id: Optional message ID to reply to
+            cover: Optional thumbnail URL
+            duration: Optional video duration in seconds
+            width: Optional video width
+            height: Optional video height
 
         Returns:
             Sent message object
@@ -168,11 +176,20 @@ class BotClient:
             "chat_id": chat_id,
             "video": video,
             "parse_mode": "HTML",
+            "supports_streaming": True,
         }
         if caption:
             params["caption"] = caption
         if reply_to_message_id:
             params["reply_to_message_id"] = reply_to_message_id
+        if cover:
+            params["thumbnail"] = cover
+        if duration:
+            params["duration"] = duration
+        if width:
+            params["width"] = width
+        if height:
+            params["height"] = height
 
         logger.debug("Sending video to chat %s", chat_id)
         return await self._call_api("sendVideo", params)

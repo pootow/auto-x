@@ -320,7 +320,16 @@ async def run_bot_mode(
                         try:
                             if media:
                                 if media.get('type') == 'video':
-                                    await client.send_video(result_chat_id, media['url'], caption=text, reply_to_message_id=msg_id)
+                                    await client.send_video(
+                                        result_chat_id,
+                                        media['url'],
+                                        caption=text,
+                                        reply_to_message_id=msg_id,
+                                        cover=media.get('cover'),
+                                        duration=media.get('duration'),
+                                        width=media.get('width'),
+                                        height=media.get('height')
+                                    )
                                     logger.debug("Sent video reply to message %s", msg_id)
                                 elif media.get('type') == 'image':
                                     await client.send_photo(result_chat_id, media['url'], caption=text, reply_to_message_id=msg_id)
