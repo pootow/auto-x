@@ -108,6 +108,14 @@ MAX_TG_VIDEO_SIZE = 50 * 1024 * 1024
 INFO_JSON_PATTERN = re.compile(r'\[info\] Writing .*? metadata as JSON to: (.+\.info\.json)')
 
 
+def escape_html(text: str) -> str:
+    """Escape special characters for Telegram HTML format.
+
+    Only <, >, and & need escaping in HTML mode.
+    """
+    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
 def extract_urls(text: str) -> list[str]:
     """Extract all http/https URLs from text."""
     if not text:
@@ -209,13 +217,14 @@ def load_template() -> str:
 
 
 def render_template(template: str, info: dict) -> str:
-    """Render template with info dict."""
-    # Prepare template variables with defaults
+    """Render template with info dict, escaping for HTML."""
+    # Prepare template variables with defaults, escaped for HTML
     vars = {
-        "title": info.get("title", "Unknown"),
-        "duration_string": info.get("duration_string", "?"),
-        "uploader": info.get("uploader", "Unknown"),
-        "webpage_url": info.get("webpage_url", ""),
+        "title": escape_html(info.get("title", "Unknown")),
+        "description": escape_html(info.get("description", "")),
+        "duration_string": escape_html(info.get("duration_string", "?")),
+        "uploader": escape_html(info.get("uploader", "Unknown")),
+        "webpage_url": escape_html(info.get("webpage_url", "")),
         "filesize_mb": round(info.get("filesize_approx", 0) / 1024 / 1024, 1),
         "like_count": info.get("like_count", 0),
         "repost_count": info.get("repost_count", 0),

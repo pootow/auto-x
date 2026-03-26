@@ -167,7 +167,7 @@ class BotClient:
         params = {
             "chat_id": chat_id,
             "video": video,
-            "parse_mode": "MarkdownV2",
+            "parse_mode": "HTML",
         }
         if caption:
             params["caption"] = caption
@@ -198,7 +198,7 @@ class BotClient:
         params = {
             "chat_id": chat_id,
             "photo": photo,
-            "parse_mode": "MarkdownV2",
+            "parse_mode": "HTML",
         }
         if caption:
             params["caption"] = caption

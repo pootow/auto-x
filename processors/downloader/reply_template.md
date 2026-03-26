@@ -1,5 +1,5 @@
-# {title}
-_Duration: {duration_string} | Size: {filesize_mb}MB_
+<b>{title}</b>
+<i>Duration: {duration_string} | Size: {filesize_mb}MB</i>
 
 Uploader: {uploader}
-[Link]({webpage_url})
+<a href="{webpage_url}">Link</a>
