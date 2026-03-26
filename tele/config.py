@@ -8,6 +8,25 @@ from dataclasses import dataclass, field
 import yaml
 
 
+def _normalize_api_endpoint(endpoint: str) -> str:
+    """Normalize bot API endpoint.
+
+    Strips protocol prefix and trailing slashes.
+
+    Args:
+        endpoint: Raw endpoint string (e.g., "https://api.telegram.org/")
+
+    Returns:
+        Normalized endpoint (e.g., "api.telegram.org")
+    """
+    # Strip protocol prefix if present
+    if "://" in endpoint:
+        endpoint = endpoint.split("://", 1)[1]
+    # Strip trailing slashes
+    endpoint = endpoint.rstrip("/")
+    return endpoint
+
+
 @dataclass
 class TelegramConfig:
     """Telegram API configuration."""
@@ -49,7 +68,9 @@ class Config:
             api_id=telegram_data.get('api_id'),
             api_hash=telegram_data.get('api_hash'),
             bot_token=telegram_data.get('bot_token'),
-            bot_api_endpoint=telegram_data.get('bot_api_endpoint', 'api.telegram.org'),
+            bot_api_endpoint=_normalize_api_endpoint(
+                telegram_data.get('bot_api_endpoint', 'api.telegram.org')
+            ),
             session_name=telegram_data.get('session_name', 'tele_tool'),
         )
 

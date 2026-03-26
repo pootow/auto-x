@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tele.config import Config, ConfigManager, TelegramConfig, DefaultsConfig, load_config
+from tele.config import Config, ConfigManager, TelegramConfig, DefaultsConfig, load_config, _normalize_api_endpoint
 
 
 class TestConfig:
@@ -125,3 +125,41 @@ class TestConfigManager:
         config = manager.load()
 
         assert config.telegram.bot_token == "test_bot_token_123"
+
+    def test_bot_api_endpoint_normalization(self, temp_config_dir):
+        """Test bot_api_endpoint normalization in config file."""
+        config_path = os.path.join(temp_config_dir, "config.yaml")
+        manager = ConfigManager(config_path)
+
+        # Save config with endpoint that has protocol and trailing slash
+        config = Config(
+            telegram=TelegramConfig(
+                api_id=12345,
+                api_hash="test_hash",
+                bot_api_endpoint="https://custom.api.server/",
+            ),
+        )
+        manager.save(config)
+
+        loaded = manager.load()
+        # Note: load() uses from_dict which normalizes, but save saves the normalized value
+        assert loaded.telegram.bot_api_endpoint == "custom.api.server"
+
+
+class TestNormalizeApiEndpoint:
+    """Test cases for _normalize_api_endpoint function."""
+
+    @pytest.mark.parametrize("input_value,expected", [
+        ("api.telegram.org", "api.telegram.org"),
+        ("https://api.telegram.org", "api.telegram.org"),
+        ("http://api.telegram.org", "api.telegram.org"),
+        ("api.telegram.org/", "api.telegram.org"),
+        ("api.telegram.org//", "api.telegram.org"),
+        ("https://api.telegram.org/", "api.telegram.org"),
+        ("http://custom.server/", "custom.server"),
+        ("https://custom.server", "custom.server"),
+        ("custom.server/", "custom.server"),
+    ])
+    def test_normalize(self, input_value, expected):
+        """Test various endpoint formats are normalized correctly."""
+        assert _normalize_api_endpoint(input_value) == expected

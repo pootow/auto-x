@@ -224,6 +224,7 @@ def render_template(template: str, info: dict) -> str:
         "description": escape_html(info.get("description", "")),
         "duration_string": escape_html(info.get("duration_string", "?")),
         "uploader": escape_html(info.get("uploader", "Unknown")),
+        "uploader_id": escape_html(info.get("uploader_id", "Unknown")),
         "webpage_url": escape_html(info.get("webpage_url", "")),
         "filesize_mb": round(info.get("filesize_approx", 0) / 1024 / 1024, 1),
         "like_count": info.get("like_count", 0),
