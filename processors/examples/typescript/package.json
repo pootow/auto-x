@@ -1,0 +1,14 @@
+{
+  "name": "tele-echo-processor",
+  "version": "1.0.0",
+  "description": "Example TypeScript processor for tele bot mode",
+  "main": "dist/echo.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/echo.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

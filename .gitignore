@@ -45,3 +45,5 @@ htmlcov/
 
 # Claude Code
 .claude/
+
+.history/
