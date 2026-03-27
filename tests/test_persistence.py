@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from tele.state import PendingMessage, PendingQueue, DeadLetter, DeadLetterQueue, FatalError, FatalQueue
+from tele.tasks import InteractionTask, DeadInteractionTask, create_received_mark_task, create_result_mark_task, create_reply_task
+from tele.async_queue import PersistentQueue
 
 
 class TestPendingMessage:
@@ -355,3 +357,346 @@ class TestFatalQueue:
             ))
 
             assert path.exists()
+
+
+class TestInteractionTask:
+    """Tests for InteractionTask dataclass."""
+
+    def test_create_received_mark_task(self):
+        """Test creating a received_mark interaction task."""
+        task = InteractionTask(
+            id=123,
+            chat_id=456,
+            interaction_type='received_mark',
+            data={'emoji': '👀'},
+        )
+        assert task.id == 123
+        assert task.chat_id == 456
+        assert task.interaction_type == 'received_mark'
+        assert task.data['emoji'] == '👀'
+
+    def test_create_result_mark_task(self):
+        """Test creating a result_mark interaction task."""
+        task = InteractionTask(
+            id=123,
+            chat_id=456,
+            interaction_type='result_mark',
+            data={'emoji': '✅'},
+        )
+        assert task.id == 123
+        assert task.interaction_type == 'result_mark'
+        assert task.data['emoji'] == '✅'
+
+    def test_create_reply_video_task(self):
+        """Test creating a reply_video interaction task."""
+        task = InteractionTask(
+            id=123,
+            chat_id=456,
+            interaction_type='reply_video',
+            data={
+                'text': 'Video caption',
+                'media': {
+                    'type': 'video',
+                    'url': 'https://example.com/video.mp4',
+                    'duration': 60,
+                    'width': 1920,
+                    'height': 1080,
+                },
+            },
+        )
+        assert task.id == 123
+        assert task.interaction_type == 'reply_video'
+        assert task.data['text'] == 'Video caption'
+        assert task.data['media']['url'] == 'https://example.com/video.mp4'
+
+    def test_create_reply_text_task(self):
+        """Test creating a reply_text interaction task."""
+        task = InteractionTask(
+            id=123,
+            chat_id=456,
+            interaction_type='reply_text',
+            data={'text': 'Hello!', 'media': None},
+        )
+        assert task.id == 123
+        assert task.interaction_type == 'reply_text'
+        assert task.data['text'] == 'Hello!'
+
+    def test_interaction_task_defaults(self):
+        """Test interaction task with defaults."""
+        task = InteractionTask(
+            id=1,
+            chat_id=123,
+            interaction_type='received_mark',
+            data={'emoji': '👀'},
+        )
+        assert task.retry_count == 0
+        assert task.last_attempt is None
+        assert task.created_at is not None
+
+
+class TestInteractionTaskHelpers:
+    """Tests for interaction task helper functions."""
+
+    def test_create_received_mark_task_helper(self):
+        """Test the create_received_mark_task helper function."""
+        task = create_received_mark_task(123, 456, '👀')
+        assert task.id == 123
+        assert task.chat_id == 456
+        assert task.interaction_type == 'received_mark'
+        assert task.data['emoji'] == '👀'
+
+    def test_create_result_mark_task_helper(self):
+        """Test the create_result_mark_task helper function."""
+        task = create_result_mark_task(123, 456, '✅')
+        assert task.id == 123
+        assert task.chat_id == 456
+        assert task.interaction_type == 'result_mark'
+        assert task.data['emoji'] == '✅'
+
+    def test_create_reply_task_with_video(self):
+        """Test the create_reply_task helper function with video."""
+        reply_item = {
+            'text': 'Video caption',
+            'media': {
+                'type': 'video',
+                'url': 'https://example.com/video.mp4',
+            },
+        }
+        task = create_reply_task(123, 456, reply_item)
+        assert task.id == 123
+        assert task.chat_id == 456
+        assert task.interaction_type == 'reply_video'
+        assert task.data['media']['url'] == 'https://example.com/video.mp4'
+
+    def test_create_reply_task_with_image(self):
+        """Test the create_reply_task helper function with image."""
+        reply_item = {
+            'text': 'Image caption',
+            'media': {
+                'type': 'image',
+                'url': 'https://example.com/image.jpg',
+            },
+        }
+        task = create_reply_task(123, 456, reply_item)
+        assert task.id == 123
+        assert task.interaction_type == 'reply_photo'
+        assert task.data['media']['url'] == 'https://example.com/image.jpg'
+
+    def test_create_reply_task_text_only(self):
+        """Test the create_reply_task helper function with text only."""
+        reply_item = {'text': 'Hello!'}
+        task = create_reply_task(123, 456, reply_item)
+        assert task.id == 123
+        assert task.chat_id == 456
+        assert task.interaction_type == 'reply_text'
+        assert task.data['text'] == 'Hello!'
+
+
+class TestInteractionQueue:
+    """Tests for InteractionTask queue with PersistentQueue."""
+
+    def test_append_and_read_interaction(self, tmp_path):
+        """Test appending and reading interaction tasks."""
+        pending_path = tmp_path / "interaction_pending.jsonl"
+        queue = PersistentQueue[InteractionTask](
+            path=pending_path,
+            item_class=InteractionTask
+        )
+
+        task = InteractionTask(
+            id=1,
+            chat_id=123,
+            interaction_type='result_mark',
+            data={'emoji': '✅'}
+        )
+        queue.append(task)
+
+        items = queue.read_all()
+        assert len(items) == 1
+        assert items[0].interaction_type == 'result_mark'
+        assert items[0].data['emoji'] == '✅'
+
+    def test_read_empty_queue(self, tmp_path):
+        """Test reading from empty queue."""
+        pending_path = tmp_path / "interaction_pending.jsonl"
+        queue = PersistentQueue[InteractionTask](
+            path=pending_path,
+            item_class=InteractionTask
+        )
+        items = queue.read_all()
+        assert items == []
+
+    def test_remove_interaction(self, tmp_path):
+        """Test removing interaction tasks by ID."""
+        pending_path = tmp_path / "interaction_pending.jsonl"
+        queue = PersistentQueue[InteractionTask](
+            path=pending_path,
+            item_class=InteractionTask
+        )
+
+        # Add multiple tasks
+        for i in range(3):
+            queue.append(InteractionTask(
+                id=i + 1,
+                chat_id=123,
+                interaction_type='received_mark',
+                data={'emoji': '👀'}
+            ))
+
+        # Remove first and third
+        queue.remove([1, 3])
+
+        items = queue.read_all()
+        assert len(items) == 1
+        assert items[0].id == 2
+
+    def test_update_interaction_retry_count(self, tmp_path):
+        """Test updating interaction retry count."""
+        pending_path = tmp_path / "interaction_pending.jsonl"
+        queue = PersistentQueue[InteractionTask](
+            path=pending_path,
+            item_class=InteractionTask
+        )
+
+        task = InteractionTask(
+            id=1,
+            chat_id=123,
+            interaction_type='received_mark',
+            data={'emoji': '👀'},
+            retry_count=0,
+            last_attempt=None,
+        )
+        queue.append(task)
+
+        # Update retry count
+        task.retry_count = 2
+        task.last_attempt = "2024-01-15T10:00:00Z"
+        queue.update(task)
+
+        items = queue.read_all()
+        assert len(items) == 1
+        assert items[0].retry_count == 2
+        assert items[0].last_attempt == "2024-01-15T10:00:00Z"
+
+    def test_dead_interaction_queue(self, tmp_path):
+        """Test dead-letter queue for interactions."""
+        dead_path = tmp_path / "interaction_dead.jsonl"
+        queue = PersistentQueue[DeadInteractionTask](
+            path=dead_path,
+            item_class=DeadInteractionTask
+        )
+
+        task = DeadInteractionTask(
+            id=1,
+            chat_id=123,
+            interaction_type='result_mark',
+            data={'emoji': '✅'},
+            error="Network timeout",
+            failed_at="2024-01-15T10:00:00Z",
+        )
+        queue.append(task)
+
+        items = queue.read_all()
+        assert len(items) == 1
+        assert items[0].interaction_type == 'result_mark'
+        assert items[0].error == "Network timeout"
+
+    def test_creates_parent_directory(self):
+        """Test that parent directory is created."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "subdir" / "interaction_pending.jsonl"
+            queue = PersistentQueue[InteractionTask](
+                path=path,
+                item_class=InteractionTask
+            )
+
+            queue.append(InteractionTask(
+                id=1,
+                chat_id=123,
+                interaction_type='received_mark',
+                data={'emoji': '👀'}
+            ))
+
+            assert path.exists()
+
+    def test_handles_corrupted_lines(self, tmp_path):
+        """Test handling corrupted JSON lines."""
+        pending_path = tmp_path / "interaction_pending.jsonl"
+        queue = PersistentQueue[InteractionTask](
+            path=pending_path,
+            item_class=InteractionTask
+        )
+
+        # Write valid and invalid lines
+        with open(pending_path, 'w') as f:
+            f.write('{"id": 1, "chat_id": 123, "interaction_type": "received_mark", "data": {"emoji": "👀"}}\n')
+            f.write('invalid json\n')
+            f.write('{"id": 2, "chat_id": 123, "interaction_type": "result_mark", "data": {"emoji": "✅"}}\n')
+
+        items = queue.read_all()
+        assert len(items) == 2
+        assert items[0].id == 1
+        assert items[1].id == 2
+
+    def test_remove_by_id_and_chat_prevents_collision(self, tmp_path):
+        """Test that remove_by_id_and_chat prevents cross-chat collision.
+
+        Two items with same id but different chat_id should not be removed together.
+        """
+        pending_path = tmp_path / "interaction_pending.jsonl"
+        queue = PersistentQueue[InteractionTask](
+            path=pending_path,
+            item_class=InteractionTask
+        )
+
+        # Add two items with SAME id but DIFFERENT chat_id
+        queue.append(InteractionTask(
+            id=100,  # Same id
+            chat_id=111,  # Chat A
+            interaction_type='received_mark',
+            data={'emoji': '👀'}
+        ))
+        queue.append(InteractionTask(
+            id=100,  # Same id
+            chat_id=222,  # Chat B - DIFFERENT
+            interaction_type='received_mark',
+            data={'emoji': '✅'}
+        ))
+
+        # Remove only the first one (id=100, chat_id=111)
+        queue.remove_by_id_and_chat([(100, 111)])
+
+        items = queue.read_all()
+        assert len(items) == 1
+        assert items[0].chat_id == 222  # Chat B's item should remain
+
+    def test_remove_by_id_and_chat_multiple(self, tmp_path):
+        """Test removing multiple items by (id, chat_id) tuples."""
+        pending_path = tmp_path / "interaction_pending.jsonl"
+        queue = PersistentQueue[InteractionTask](
+            path=pending_path,
+            item_class=InteractionTask
+        )
+
+        # Add multiple items
+        for chat_id in [111, 222, 333]:
+            for msg_id in [1, 2]:
+                queue.append(InteractionTask(
+                    id=msg_id,
+                    chat_id=chat_id,
+                    interaction_type='received_mark',
+                    data={'emoji': '👀'}
+                ))
+
+        # Verify 6 items
+        assert len(queue.read_all()) == 6
+
+        # Remove specific items: (1, 111) and (2, 222)
+        queue.remove_by_id_and_chat([(1, 111), (2, 222)])
+
+        items = queue.read_all()
+        assert len(items) == 4
+        remaining_chats = [i.chat_id for i in items]
+        remaining_ids = [(i.id, i.chat_id) for i in items]
+        assert (1, 111) not in remaining_ids
+        assert (2, 222) not in remaining_ids

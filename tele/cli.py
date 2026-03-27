@@ -200,7 +200,10 @@ async def run_bot_mode(
         verbose: Verbosity level
     """
     from .state import PendingQueue, PendingMessage, DeadLetterQueue, DeadLetter, FatalQueue, FatalError
-    from .tasks import MessageTask, InteractionTask, DeadMessageTask, DeadInteractionTask
+    from .tasks import (
+        MessageTask, InteractionTask, DeadMessageTask, DeadInteractionTask,
+        create_received_mark_task, create_result_mark_task, create_reply_task
+    )
     from .async_queue import PersistentQueue, AsyncRetryQueue
     from datetime import datetime, timezone
 
@@ -230,9 +233,87 @@ async def run_bot_mode(
     fatal_path = str(state_dir / "bot_fatal.jsonl")
     fatal_queue = FatalQueue(fatal_path)
 
+    # Initialize persistence for interactions (reactions, replies)
+    interaction_pending_path = state_dir / "interaction_pending.jsonl"
+    interaction_dead_path = state_dir / "interaction_dead.jsonl"
+    interaction_pending = PersistentQueue[InteractionTask](
+        path=interaction_pending_path,
+        item_class=InteractionTask
+    )
+    interaction_dead = PersistentQueue[DeadInteractionTask](
+        path=interaction_dead_path,
+        item_class=DeadInteractionTask
+    )
+
     # Retry configuration
     MAX_RETRIES = 3
     RETRY_DELAYS = [5, 15, 45]  # seconds
+
+    async def process_interaction(task: InteractionTask) -> bool:
+        """Process an interaction task (reaction or reply).
+
+        Args:
+            task: InteractionTask to process
+
+        Returns:
+            True on success, False on failure
+        """
+        try:
+            if task.interaction_type == 'received_mark' or task.interaction_type == 'result_mark':
+                success = await client.add_reaction(task.chat_id, task.id, task.data['emoji'])
+                return success
+            elif task.interaction_type == 'reply_video':
+                media = task.data.get('media', {})
+                result = await client.send_video(
+                    task.chat_id,
+                    media.get('url', ''),
+                    caption=task.data.get('text'),
+                    reply_to_message_id=task.id,
+                    cover=media.get('cover'),
+                    duration=media.get('duration'),
+                    width=media.get('width'),
+                    height=media.get('height')
+                )
+                return bool(result)
+            elif task.interaction_type == 'reply_photo':
+                media = task.data.get('media', {})
+                result = await client.send_photo(
+                    task.chat_id,
+                    media.get('url', ''),
+                    caption=task.data.get('text'),
+                    reply_to_message_id=task.id
+                )
+                return bool(result)
+            elif task.interaction_type == 'reply_text':
+                result = await client.send_message(
+                    task.chat_id,
+                    task.data.get('text', ''),
+                    reply_to_message_id=task.id
+                )
+                return bool(result)
+            else:
+                logger.warning("Unknown interaction_type: %s", task.interaction_type)
+                return False
+        except Exception as e:
+            logger.error("Error processing interaction %s: %s", task.id, e)
+            return False
+
+    # Create interaction queue with retry support
+    interaction_queue = AsyncRetryQueue[InteractionTask](
+        pending_queue=interaction_pending,
+        dead_letter_queue=interaction_dead,
+        process_func=process_interaction,
+        check_interval=10.0,
+        max_retries=6,
+    )
+
+    # Start the interaction queue background processing
+    await interaction_queue.start()
+
+    # Check for pending interactions from previous session
+    pending_interactions = interaction_pending.read_all()
+    if pending_interactions:
+        logger.info("Replaying %s pending interactions from previous session", len(pending_interactions))
 
     batcher = MessageBatcher(page_size=page_size, interval=interval)
 
@@ -321,42 +402,16 @@ async def run_bot_mode(
                 emoji = failed_mark
                 error_ids.append(msg_key)
 
-            # Add reaction - NEVER raises (bot_client handles errors)
-            success = await client.add_reaction(result_chat_id, msg_id, emoji)
-            if success:
-                logger.debug("Marked message %s in chat %s with %s", msg_id, result_chat_id, emoji)
-            else:
-                logger.warning("Failed to mark message %s in chat %s (will not retry reaction)", msg_id, result_chat_id)
+            # Add reaction via interaction queue (with persistence and retry)
+            task = create_result_mark_task(msg_id, result_chat_id, emoji)
+            await interaction_queue.enqueue(task)
 
-            # Handle rich reply from processor
+            # Handle rich reply from processor via interaction queue
             if status == 'success' and 'reply' in result and result['reply']:
                 for r in result['reply']:
-                    text = r.get('text', '')
-                    media = r.get('media')
-                    try:
-                        if media:
-                            if media.get('type') == 'video':
-                                await client.send_video(
-                                    result_chat_id,
-                                    media['url'],
-                                    caption=text,
-                                    reply_to_message_id=msg_id,
-                                    cover=media.get('cover'),
-                                    duration=media.get('duration'),
-                                    width=media.get('width'),
-                                    height=media.get('height')
-                                )
-                                logger.debug("Sent video reply to message %s", msg_id)
-                            elif media.get('type') == 'image':
-                                await client.send_photo(result_chat_id, media['url'], caption=text, reply_to_message_id=msg_id)
-                                logger.debug("Sent photo reply to message %s", msg_id)
-                        elif text:
-                            # Text-only reply - send as text message
-                            await client.send_message(result_chat_id, text, reply_to_message_id=msg_id)
-                            logger.debug("Sent text reply to message %s", msg_id)
-                    except Exception as e:
-                        # Should not happen since client methods never raise, but be safe
-                        logger.error("Failed to send reply for message %s: %s", msg_id, e)
+                    task = create_reply_task(msg_id, result_chat_id, r)
+                    await interaction_queue.enqueue(task)
+                    logger.debug("Queued reply for message %s", msg_id)
 
         # Handle fatal errors - append to fatal.jsonl
         if fatal_ids:
@@ -485,13 +540,10 @@ async def run_bot_mode(
                     })
                     logger.debug("Queued message %s for processing", msg_id)
 
-                    # Add received reaction - NEVER crashes
+                    # Add received reaction via interaction queue (with persistence and retry)
                     if received_mark:
-                        success = await client.add_reaction(msg_chat_id, msg_id, received_mark)
-                        if success:
-                            logger.debug("Added received mark to message %s", msg_id)
-                        else:
-                            logger.warning("Failed to add received mark to message %s (non-critical)", msg_id)
+                        task = create_received_mark_task(msg_id, msg_chat_id, received_mark)
+                        await interaction_queue.enqueue(task)
 
                     # NOTE: Do NOT save offset here - offset is saved only after successful processing
 
@@ -509,6 +561,8 @@ async def run_bot_mode(
         logger.info("Shutting down...")
         await batcher.flush_remaining()
     finally:
+        # Stop interaction queue gracefully
+        await interaction_queue.stop()
         # Cancel any pending retry tasks
         for task in scheduled_retries.values():
             task.cancel()

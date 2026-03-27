@@ -178,6 +178,58 @@ class PersistentQueue(Generic[T]):
             logger.error("Failed to remove from %s: %s", self.path, e)
             return False
 
+    def remove_by_id_and_chat(self, items: List[tuple]) -> bool:
+        """Remove items by (id, chat_id) tuples to prevent cross-chat collision.
+
+        Telegram message_ids are per-chat sequences. Chat A's message_id=100
+        and Chat B's message_id=100 are DIFFERENT messages. Using remove(id)
+        alone could accidentally delete the wrong item from another chat.
+
+        Args:
+            items: List of (id, chat_id) tuples to remove
+
+        Returns:
+            True on success, False on failure (never raises)
+        """
+        if not items:
+            return True
+
+        if not self.path.exists():
+            return True
+
+        try:
+            # Read all, filter out removed ones
+            remaining = []
+            with open(self.path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            item_id = data.get('id')
+                            item_chat_id = data.get('chat_id')
+                            # Match by (id, chat_id) tuple
+                            if (item_id, item_chat_id) not in items:
+                                remaining.append(line)
+                        except json.JSONDecodeError:
+                            continue
+
+            # Atomic write: write to temp file, then rename
+            temp_path = self.path.with_suffix('.tmp')
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                for line in remaining:
+                    f.write(line + '\n')
+
+            # Atomic rename
+            temp_path.replace(self.path)
+
+            # Invalidate cache
+            self._cache = None
+            return True
+        except Exception as e:
+            logger.error("Failed to remove by (id, chat_id) from %s: %s", self.path, e)
+            return False
+
     def update(self, item: T) -> bool:
         """Update an item in the queue (rewrite file).
 
@@ -456,12 +508,18 @@ class AsyncRetryQueue(Generic[T]):
     def _on_success(self, item: T) -> None:
         """Handle successful processing."""
         item_id = getattr(item, 'id', '?')
-        self.pending_queue.remove([item_id])
+        item_chat_id = getattr(item, 'chat_id', None)
+        if item_chat_id is not None:
+            # Use (id, chat_id) tuple to prevent cross-chat collision
+            self.pending_queue.remove_by_id_and_chat([(item_id, item_chat_id)])
+        else:
+            self.pending_queue.remove([item_id])
         logger.debug("Item %s processed successfully, removed from queue", item_id)
 
     def _on_failure(self, item: T) -> None:
         """Handle failed processing."""
         item_id = getattr(item, 'id', '?')
+        item_chat_id = getattr(item, 'chat_id', None)
         retry_count = getattr(item, 'retry_count', 0)
 
         if retry_count >= self.max_retries:
@@ -474,8 +532,19 @@ class AsyncRetryQueue(Generic[T]):
                     item.retry_count = retry_count + 1
                 if hasattr(item, 'last_attempt'):
                     item.last_attempt = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-                self.dead_letter_queue.append(item)
-            self.pending_queue.remove([item_id])
+                append_success = self.dead_letter_queue.append(item)
+                if not append_success:
+                    logger.error("Failed to append item %s to dead-letter queue %s! Item may be lost!",
+                               item_id, self.dead_letter_queue.path)
+            else:
+                logger.warning("No dead_letter_queue configured! Item %s will be lost!", item_id)
+            # Remove from pending queue using (id, chat_id) tuple to prevent cross-chat collision
+            if item_chat_id is not None:
+                remove_success = self.pending_queue.remove_by_id_and_chat([(item_id, item_chat_id)])
+            else:
+                remove_success = self.pending_queue.remove([item_id])
+            if not remove_success:
+                logger.warning("Failed to remove item %s from pending queue", item_id)
         else:
             # Update retry count and last_attempt
             if hasattr(item, 'retry_count'):

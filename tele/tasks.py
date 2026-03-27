@@ -185,6 +185,9 @@ def create_reply_task(
     media = reply_item.get('media')
     if media:
         media_type = media.get('type', 'text')
+        # Map 'image' to 'photo' for consistency with Telegram Bot API terminology
+        if media_type == 'image':
+            media_type = 'photo'
         interaction_type = f'reply_{media_type}'  # 'reply_video' or 'reply_photo'
     else:
         interaction_type = 'reply_text'
