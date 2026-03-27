@@ -96,10 +96,10 @@ logger = logging.getLogger(__name__)
 URL_PATTERN = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
 
 # Default download directory
-DOWNLOAD_DIR = Path.home() / "Downloads" / "tele"
+DOWNLOAD_DIR = Path("F:/x.com-v")
 
 # Download timeout in seconds (5 minutes for large videos)
-DOWNLOAD_TIMEOUT = 300
+DOWNLOAD_TIMEOUT = 1800
 
 # Max video size for Telegram to show directly (50MB)
 MAX_TG_VIDEO_SIZE = 50 * 1024 * 1024
