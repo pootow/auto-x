@@ -70,7 +70,7 @@ load_config() -> BotClient() -> poll_updates() -> filter() -> batch() -> exec() 
 | `add_reaction()` | Mark via Bot API |
 | `get_chat_id()` | Extract chat from update |
 
-**State**: Offset-based, stored in `bot_{chat_id}.json`
+**State**: Offset-based, stored in `bot.json` (global, not per-chat)
 
 **Offset Update Rule**: Only after successful exec + successful marking
 
@@ -113,11 +113,11 @@ True/False
 {"last_message_id": 123, "last_processed_at": "2024-01-15T10:00:00Z"}
 ```
 
-**Bot Mode Files**:
-- `bot_{chat_id}.json` - Offset state
-- `bot_{chat_id}_pending.jsonl` - Messages waiting to be processed
-- `bot_{chat_id}_dead.jsonl` - Retriable errors after 3 retries
-- `bot_{chat_id}_fatal.jsonl` - Fatal errors (no retry value)
+**Bot Mode Files** (global - Telegram offset is not per-chat):
+- `bot.json` - Offset state
+- `bot_pending.jsonl` - Messages waiting to be processed
+- `bot_dead.jsonl` - Retriable errors after 3 retries
+- `bot_fatal.jsonl` - Fatal errors (no retry value)
 
 **Processor Status Values**:
 
@@ -166,16 +166,16 @@ Processor crash:
 
 ```bash
 # View dead letters (retriable errors that exhausted retries)
-cat ~/.tele/state/bot_123_dead.jsonl
+cat ~/.tele/state/bot_dead.jsonl
 
 # View fatal errors (no retry value)
-cat ~/.tele/state/bot_123_fatal.jsonl
+cat ~/.tele/state/bot_fatal.jsonl
 
 # Retry dead letters with original processor
-tele --retry-dead ~/.tele/state/bot_123_dead.jsonl
+tele --retry-dead ~/.tele/state/bot_dead.jsonl
 
 # Retry with different processor
-tele --retry-dead ~/.tele/state/bot_123_dead.jsonl --exec "new-processor"
+tele --retry-dead ~/.tele/state/bot_dead.jsonl --exec "new-processor"
 ```
 
 **Logic**:

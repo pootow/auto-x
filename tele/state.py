@@ -186,7 +186,10 @@ class StateManager:
 
 
 class BotStateManager:
-    """Manages bot mode state (offset-based)."""
+    """Manages bot mode state (offset-based).
+
+    Bot API offset is global (not per-chat), so state is stored in a single file.
+    """
 
     def __init__(self, state_dir: Optional[str] = None):
         """Initialize bot state manager.
@@ -199,27 +202,21 @@ class BotStateManager:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
-    def _state_path(self, chat_id: int) -> Path:
-        """Get the path to a chat's bot state file.
-
-        Args:
-            chat_id: Chat ID
+    def _state_path(self) -> Path:
+        """Get the path to the bot state file.
 
         Returns:
-            Path to state file
+            Path to state file (bot.json)
         """
-        return self.state_dir / f"bot_{chat_id}.json"
+        return self.state_dir / "bot.json"
 
-    def load(self, chat_id: int) -> dict:
-        """Load bot state for a chat.
-
-        Args:
-            chat_id: Chat ID
+    def load(self) -> dict:
+        """Load bot state.
 
         Returns:
             dict with last_update_id (0 if no state) and last_processed_at
         """
-        path = self._state_path(chat_id)
+        path = self._state_path()
         if path.exists():
             try:
                 with open(path, 'r', encoding='utf-8') as f:
@@ -234,14 +231,13 @@ class BotStateManager:
                 pass
         return {"last_update_id": 0, "last_processed_at": None}
 
-    def save(self, chat_id: int, update_id: int) -> None:
+    def save(self, update_id: int) -> None:
         """Save bot state after successful processing.
 
         Args:
-            chat_id: Chat ID
             update_id: Last processed update ID
         """
-        path = self._state_path(chat_id)
+        path = self._state_path()
         state = {
             "last_update_id": update_id,
             "last_processed_at": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
@@ -264,27 +260,29 @@ class PendingMessage:
 class PendingQueue:
     """Manages pending messages for crash recovery.
 
+    Bot API offset is global (not per-chat), so pending messages are stored
+    in a single queue file. Each message carries its own chat_id for
+    operations (reactions, replies).
+
     All I/O operations are safe - they never raise exceptions.
     On failure, they log errors and return appropriate default values.
     """
 
-    def __init__(self, chat_id: int, state_dir: Optional[str] = None):
+    def __init__(self, state_dir: Optional[str] = None):
         """Initialize pending queue.
 
         Args:
-            chat_id: Chat ID this queue is for
             state_dir: Directory for state files (defaults to ~/.tele/state/)
         """
         if state_dir is None:
             state_dir = os.path.expanduser("~/.tele/state")
         self.state_dir = Path(state_dir)
-        self.chat_id = chat_id
         # In-memory cache for resilience
         self._cache: Optional[list[PendingMessage]] = None
 
     def _queue_path(self) -> Path:
         """Get the path to the pending queue file."""
-        return self.state_dir / f"bot_{self.chat_id}_pending.jsonl"
+        return self.state_dir / "bot_pending.jsonl"
 
     def append(self, msg: PendingMessage) -> bool:
         """Append a message to the pending queue.
@@ -336,7 +334,11 @@ class PendingQueue:
         return messages.copy()
 
     def remove(self, message_ids: list[int]) -> bool:
-        """Remove messages by message_id (rewrite file without them).
+        """Remove messages by message_id only (DEPRECATED - use remove_by_chat).
+
+        WARNING: This method does not consider chat_id and may incorrectly
+        remove messages from different chats that happen to have the same
+        message_id. Telegram message_ids are per-chat sequences.
 
         Args:
             message_ids: List of message IDs to remove
@@ -361,6 +363,57 @@ class PendingQueue:
                         try:
                             data = json.loads(line)
                             if data.get('message_id') not in message_ids:
+                                remaining.append(line)
+                        except json.JSONDecodeError:
+                            continue
+
+            # Atomic rewrite: write to temp file, then rename
+            temp_path = path.with_suffix('.tmp')
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                for line in remaining:
+                    f.write(line + '\n')
+
+            temp_path.replace(path)
+            self._cache = None
+            return True
+        except Exception as e:
+            logger.error("Failed to remove from %s: %s", path, e)
+            return False
+
+    def remove_by_chat(self, ids: list[tuple[int, int]]) -> bool:
+        """Remove messages by (message_id, chat_id) tuple.
+
+        Telegram message_ids are per-chat sequences. Chat A's message_id=100
+        and Chat B's message_id=100 are DIFFERENT messages. This method
+        ensures only the correct message from the correct chat is removed.
+
+        Args:
+            ids: List of (message_id, chat_id) tuples to remove
+
+        Returns:
+            True on success, False on failure (never raises)
+        """
+        if not ids:
+            return True
+
+        path = self._queue_path()
+        if not path.exists():
+            return True
+
+        try:
+            # Convert to set for O(1) lookup
+            remove_set = set(ids)
+
+            # Read all, filter out removed ones
+            remaining = []
+            with open(path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            key = (data.get('message_id'), data.get('chat_id'))
+                            if key not in remove_set:
                                 remaining.append(line)
                         except json.JSONDecodeError:
                             continue

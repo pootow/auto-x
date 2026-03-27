@@ -29,10 +29,10 @@ class TestStateFileContract:
         And: Contains "last_update_id" field (integer)
         """
         state_mgr = BotStateManager(str(tmp_path))
-        state_mgr.save(chat_id=123, update_id=456)
+        state_mgr.save(update_id=456)
 
         # Read the file directly
-        state_file = tmp_path / "bot_123.json"
+        state_file = tmp_path / "bot.json"
         assert state_file.exists()
 
         with open(state_file, 'r') as f:
@@ -51,7 +51,7 @@ class TestStateFileContract:
         Then: Each line is valid JSON
         And: Each line contains: message_id, chat_id, update_id, message, retry_count
         """
-        pending_queue = PendingQueue(chat_id=123, state_dir=str(tmp_path))
+        pending_queue = PendingQueue(state_dir=str(tmp_path))
 
         msg = PendingMessage(
             message_id=456,
@@ -64,7 +64,7 @@ class TestStateFileContract:
         pending_queue.append(msg)
 
         # Read file directly
-        queue_file = tmp_path / "bot_123_pending.jsonl"
+        queue_file = tmp_path / "bot_pending.jsonl"
         assert queue_file.exists()
 
         with open(queue_file, 'r') as f:
@@ -90,7 +90,7 @@ class TestStateFileContract:
         Then: File is JSON Lines
         And: Each entry contains: message_id, chat_id, message, exec_cmd, failed_at, retry_count, error
         """
-        dead_letter_path = str(tmp_path / "bot_123_dead.jsonl")
+        dead_letter_path = str(tmp_path / "bot_dead.jsonl")
         dead_queue = DeadLetterQueue(dead_letter_path)
 
         dl = DeadLetter(
@@ -126,7 +126,7 @@ class TestStateFileContract:
         Then: File is JSON Lines
         And: Each entry contains: message_id, chat_id, message, exec_cmd, failed_at, reason
         """
-        fatal_path = str(tmp_path / "bot_123_fatal.jsonl")
+        fatal_path = str(tmp_path / "bot_fatal.jsonl")
         fatal_queue = FatalQueue(fatal_path)
 
         fe = FatalError(
@@ -162,12 +162,12 @@ class TestStateFileContract:
         And: Default values are used for missing fields
         """
         # Create old format bot state file
-        old_state_file = tmp_path / "bot_123.json"
+        old_state_file = tmp_path / "bot.json"
         with open(old_state_file, 'w') as f:
             json.dump({"last_update_id": 100}, f)  # Missing last_processed_at
 
         state_mgr = BotStateManager(str(tmp_path))
-        state = state_mgr.load(123)
+        state = state_mgr.load()
 
         # Should load successfully with default for missing field
         assert state["last_update_id"] == 100
@@ -181,7 +181,7 @@ class TestStateFileContract:
         Then: All entries are read in order
         And: Each entry is valid JSON
         """
-        pending_queue = PendingQueue(chat_id=123, state_dir=str(tmp_path))
+        pending_queue = PendingQueue(state_dir=str(tmp_path))
 
         # Add multiple messages
         for i in range(5):
@@ -209,7 +209,7 @@ class TestStateFileContract:
         Then: Remaining messages are preserved
         And: File format is still valid
         """
-        pending_queue = PendingQueue(chat_id=123, state_dir=str(tmp_path))
+        pending_queue = PendingQueue(state_dir=str(tmp_path))
 
         # Add messages
         for i in range(5):
@@ -264,7 +264,7 @@ class TestStateFileContract:
         Then: Empty list is returned
         And: No error is raised
         """
-        pending_queue = PendingQueue(chat_id=123, state_dir=str(tmp_path))
+        pending_queue = PendingQueue(state_dir=str(tmp_path))
         messages = pending_queue.read_all()
 
         assert messages == []
@@ -283,13 +283,13 @@ class TestStateFileContract:
         And: No error is raised
         """
         # Write file with one corrupted line
-        queue_file = tmp_path / "bot_123_pending.jsonl"
+        queue_file = tmp_path / "bot_pending.jsonl"
         with open(queue_file, 'w') as f:
             f.write('{"message_id": 1, "chat_id": 123, "update_id": 100, "message": {}, "retry_count": 0}\n')
             f.write('this is not valid json\n')
             f.write('{"message_id": 2, "chat_id": 123, "update_id": 200, "message": {}, "retry_count": 0}\n')
 
-        pending_queue = PendingQueue(chat_id=123, state_dir=str(tmp_path))
+        pending_queue = PendingQueue(state_dir=str(tmp_path))
         messages = pending_queue.read_all()
 
         # Should read valid entries and skip corrupted one

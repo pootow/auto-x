@@ -46,7 +46,7 @@ class TestPendingQueue:
 
     def test_append_and_read(self, tmp_path):
         """Test appending and reading messages."""
-        queue = PendingQueue(chat_id=123, state_dir=str(tmp_path))
+        queue = PendingQueue(state_dir=str(tmp_path))
 
         msg = PendingMessage(
             message_id=1,
@@ -64,13 +64,13 @@ class TestPendingQueue:
 
     def test_read_empty_queue(self, tmp_path):
         """Test reading from empty queue."""
-        queue = PendingQueue(chat_id=123, state_dir=str(tmp_path))
+        queue = PendingQueue(state_dir=str(tmp_path))
         messages = queue.read_all()
         assert messages == []
 
     def test_remove_messages(self, tmp_path):
         """Test removing messages by ID."""
-        queue = PendingQueue(chat_id=123, state_dir=str(tmp_path))
+        queue = PendingQueue(state_dir=str(tmp_path))
 
         # Add multiple messages
         for i in range(3):
@@ -90,7 +90,7 @@ class TestPendingQueue:
 
     def test_remove_nonexistent(self, tmp_path):
         """Test removing non-existent message IDs."""
-        queue = PendingQueue(chat_id=123, state_dir=str(tmp_path))
+        queue = PendingQueue(state_dir=str(tmp_path))
 
         queue.append(PendingMessage(
             message_id=1,
@@ -107,7 +107,7 @@ class TestPendingQueue:
 
     def test_remove_empty_list(self, tmp_path):
         """Test removing with empty list."""
-        queue = PendingQueue(chat_id=123, state_dir=str(tmp_path))
+        queue = PendingQueue(state_dir=str(tmp_path))
 
         queue.append(PendingMessage(
             message_id=1,
@@ -122,7 +122,7 @@ class TestPendingQueue:
 
     def test_update_message(self, tmp_path):
         """Test updating a message in the queue."""
-        queue = PendingQueue(chat_id=123, state_dir=str(tmp_path))
+        queue = PendingQueue(state_dir=str(tmp_path))
 
         msg = PendingMessage(
             message_id=1,
@@ -146,12 +146,12 @@ class TestPendingQueue:
 
     def test_queue_path(self, tmp_path):
         """Test queue file path is correct."""
-        queue = PendingQueue(chat_id=123, state_dir=str(tmp_path))
-        assert queue._queue_path() == tmp_path / "bot_123_pending.jsonl"
+        queue = PendingQueue(state_dir=str(tmp_path))
+        assert queue._queue_path() == tmp_path / "bot_pending.jsonl"
 
     def test_handles_corrupted_lines(self, tmp_path):
         """Test handling corrupted JSON lines."""
-        queue = PendingQueue(chat_id=123, state_dir=str(tmp_path))
+        queue = PendingQueue(state_dir=str(tmp_path))
 
         # Write valid and invalid lines
         path = queue._queue_path()
@@ -164,6 +164,40 @@ class TestPendingQueue:
         assert len(messages) == 2
         assert messages[0].message_id == 1
         assert messages[1].message_id == 2
+
+    def test_remove_uses_chat_id_to_avoid_cross_chat_collision(self, tmp_path):
+        """Test that remove uses (message_id, chat_id) tuple to prevent cross-chat collision.
+
+        Telegram message_ids are per-chat sequences. Chat A's message_id=100
+        and Chat B's message_id=100 are DIFFERENT messages. If remove only
+        uses message_id, it could accidentally delete the wrong message.
+        """
+        queue = PendingQueue(state_dir=str(tmp_path))  # Global queue
+
+        # Add messages from two different chats with SAME message_id
+        # Chat A: message_id=100
+        queue.append(PendingMessage(
+            message_id=100,
+            chat_id=111,  # Chat A
+            update_id=1000,
+            message={"id": 100, "text": "from chat A"},
+        ))
+        # Chat B: message_id=100 (same ID, different chat)
+        queue.append(PendingMessage(
+            message_id=100,
+            chat_id=222,  # Chat B
+            update_id=1001,
+            message={"id": 100, "text": "from chat B"},
+        ))
+
+        # Remove Chat A's message (message_id=100, chat_id=111)
+        queue.remove_by_chat([(100, 111)])
+
+        messages = queue.read_all()
+        # Chat B's message should STILL be there (same message_id, different chat_id)
+        assert len(messages) == 1
+        assert messages[0].chat_id == 222
+        assert messages[0].message["text"] == "from chat B"
 
 
 class TestDeadLetter:

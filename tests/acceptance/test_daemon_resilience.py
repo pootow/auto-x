@@ -90,7 +90,7 @@ sys.exit(1)  # Crash immediately
         And: No exception propagates to crash the daemon
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            pending_queue = PendingQueue(chat_id=123, state_dir=tmpdir)
+            pending_queue = PendingQueue(state_dir=tmpdir)
 
             msg = PendingMessage(
                 message_id=1,
@@ -158,7 +158,7 @@ sys.exit(1)  # Crash immediately
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             # Simulate previous session's pending messages
-            pending_queue = PendingQueue(chat_id=123, state_dir=tmpdir)
+            pending_queue = PendingQueue(state_dir=tmpdir)
 
             # Add messages as if from previous session
             pending_queue.append(PendingMessage(
@@ -195,7 +195,7 @@ sys.exit(1)  # Crash immediately
         And: Dead-letter file is persisted to disk
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            pending_queue = PendingQueue(chat_id=123, state_dir=tmpdir)
+            pending_queue = PendingQueue(state_dir=tmpdir)
             dead_letter_path = os.path.join(tmpdir, "bot_123_dead.jsonl")
             dead_letter_queue = DeadLetterQueue(dead_letter_path)
 
@@ -275,26 +275,28 @@ sys.exit(1)  # Crash immediately
             state_mgr = BotStateManager(tmpdir)
 
             # Simulate processing up to offset 100
-            state_mgr.save(chat_id=123, update_id=100)
+            state_mgr.save(update_id=100)
 
             # Simulate restart - load state
-            state = state_mgr.load(123)
+            state = state_mgr.load()
 
             assert state["last_update_id"] == 100
             # Next poll would use offset + 1 = 101
 
     @pytest.mark.asyncio
-    async def test_multiple_chats_have_separate_state(self):
+    async def test_global_queue_handles_multiple_chats(self):
         """
         Given: Daemon monitors multiple chats
-        When: Each chat processes messages
-        Then: Each chat has separate pending queue
-        And: Each chat has separate state file
+        When: Messages from different chats are processed
+        Then: All messages are stored in global queue
+        And: Each message carries its own chat_id
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Chat 123
-            pending_123 = PendingQueue(chat_id=123, state_dir=tmpdir)
-            pending_123.append(PendingMessage(
+            # Global queue for all chats
+            pending_queue = PendingQueue(state_dir=tmpdir)
+
+            # Add message from chat 123
+            pending_queue.append(PendingMessage(
                 message_id=1,
                 chat_id=123,
                 update_id=100,
@@ -302,24 +304,23 @@ sys.exit(1)  # Crash immediately
                 retry_count=0,
             ))
 
-            # Chat 456
-            pending_456 = PendingQueue(chat_id=456, state_dir=tmpdir)
-            pending_456.append(PendingMessage(
-                message_id=1,
+            # Add message from chat 456
+            pending_queue.append(PendingMessage(
+                message_id=1,  # Same message_id, different chat_id
                 chat_id=456,
                 update_id=200,
                 message={"id": 1, "text": "chat 456"},
                 retry_count=0,
             ))
 
-            # Verify separate queues
-            msgs_123 = pending_123.read_all()
-            msgs_456 = pending_456.read_all()
+            # Verify all messages in global queue
+            msgs = pending_queue.read_all()
 
-            assert len(msgs_123) == 1
-            assert len(msgs_456) == 1
-            assert msgs_123[0].chat_id == 123
-            assert msgs_456[0].chat_id == 456
+            assert len(msgs) == 2
+            # Both messages exist with their respective chat_ids
+            chat_ids = [m.chat_id for m in msgs]
+            assert 123 in chat_ids
+            assert 456 in chat_ids
 
     @pytest.mark.asyncio
     async def test_retry_backoff_increases(self):
@@ -354,8 +355,8 @@ sys.exit(1)  # Crash immediately
         # The daemon should catch KeyboardInterrupt and clean up
         with tempfile.TemporaryDirectory() as tmpdir:
             state_mgr = BotStateManager(tmpdir)
-            state_mgr.save(chat_id=123, update_id=100)
+            state_mgr.save(update_id=100)
 
             # Verify state was saved before shutdown
-            state = state_mgr.load(123)
+            state = state_mgr.load()
             assert state["last_update_id"] == 100

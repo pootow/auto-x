@@ -188,12 +188,12 @@ class TestBotMode:
         manager = BotStateManager(str(tmp_path))
 
         # Initial state
-        state = manager.load(123456)
+        state = manager.load()
         assert state["last_update_id"] == 0
 
         # After processing
-        manager.save(123456, 100)
-        state = manager.load(123456)
+        manager.save(100)
+        state = manager.load()
         assert state["last_update_id"] == 100
 
     def test_bot_message_format(self):

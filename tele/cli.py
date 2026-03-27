@@ -220,17 +220,14 @@ async def run_bot_mode(
     state_mgr = BotStateManager()
     msg_filter = create_filter(filter_expr) if filter_expr else None
 
-    # State key for pending/offset files
-    state_key = chat_filter if chat_filter else 0
-
     # Get state directory
     state_dir = Path(state_mgr.state_dir)
 
-    # Initialize persistence for messages
-    pending_queue = PendingQueue(state_key)
-    dead_letter_path = str(pending_queue._queue_path()).replace('_pending.jsonl', '_dead.jsonl')
+    # Initialize persistence for messages (global queue - bot offset is not per-chat)
+    pending_queue = PendingQueue()
+    dead_letter_path = str(state_dir / "bot_dead.jsonl")
     dead_letter_queue = DeadLetterQueue(dead_letter_path)
-    fatal_path = str(pending_queue._queue_path()).replace('_pending.jsonl', '_fatal.jsonl')
+    fatal_path = str(state_dir / "bot_fatal.jsonl")
     fatal_queue = FatalQueue(fatal_path)
 
     # Retry configuration
@@ -258,7 +255,7 @@ async def run_bot_mode(
                 error="Max retries exceeded",
             )
             dead_letter_queue.append(dl)
-            pending_queue.remove([pmsg.message_id])
+            pending_queue.remove_by_chat([(pmsg.message_id, pmsg.chat_id)])
             return
 
         delay = RETRY_DELAYS[retry_count] if retry_count < len(RETRY_DELAYS) else RETRY_DELAYS[-1]
@@ -292,11 +289,11 @@ async def run_bot_mode(
         # run_exec_command NEVER raises - it returns error status on failure
         results = await run_exec_command(exec_cmd, messages, shell=True)
 
-        # Track message IDs by status
-        success_ids = []
-        error_ids = []   # Retriable errors
-        fatal_ids = []   # Non-retriable
-        fatal_reasons = {}  # message_id -> reason for fatal errors
+        # Track (message_id, chat_id) tuples by status
+        success_ids = []  # List of (message_id, chat_id)
+        error_ids = []   # Retriable errors - List of (message_id, chat_id)
+        fatal_ids = []   # Non-retriable - List of (message_id, chat_id)
+        fatal_reasons = {}  # (message_id, chat_id) -> reason for fatal errors
 
         # Mark messages based on status
         for result in results:
@@ -309,17 +306,20 @@ async def run_bot_mode(
                 logger.warning("Skipping result: missing id/chat_id/status: %s", result)
                 continue
 
+            # Key for tracking (message_id, chat_id) tuple
+            msg_key = (msg_id, result_chat_id)
+
             # Determine emoji based on status
             if status == 'success':
                 emoji = reaction
-                success_ids.append(msg_id)
+                success_ids.append(msg_key)
             elif status == 'fatal':
                 emoji = failed_mark
-                fatal_ids.append(msg_id)
-                fatal_reasons[msg_id] = result.get('reason', 'Processor returned fatal status')
+                fatal_ids.append(msg_key)
+                fatal_reasons[msg_key] = result.get('reason', 'Processor returned fatal status')
             else:  # 'error' or unknown - treat as retriable
                 emoji = failed_mark
-                error_ids.append(msg_id)
+                error_ids.append(msg_key)
 
             # Add reaction - NEVER raises (bot_client handles errors)
             success = await client.add_reaction(result_chat_id, msg_id, emoji)
@@ -361,14 +361,15 @@ async def run_bot_mode(
         # Handle fatal errors - append to fatal.jsonl
         if fatal_ids:
             for item in batch_items:
-                if item['message_id'] in fatal_ids:
+                item_key = (item['message_id'], item['chat_id'])
+                if item_key in fatal_ids:
                     fe = FatalError(
                         message_id=item['message_id'],
                         chat_id=item['chat_id'],
                         message=item['message'],
                         exec_cmd=exec_cmd,
                         failed_at=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
-                        reason=fatal_reasons.get(item['message_id'], 'Processor returned fatal status'),
+                        reason=fatal_reasons.get(item_key, 'Processor returned fatal status'),
                     )
                     fatal_queue.append(fe)
                     logger.warning("Message %s marked as fatal, no retry value", item['message_id'])
@@ -376,13 +377,14 @@ async def run_bot_mode(
         # Remove successful and fatal messages from pending
         to_remove = success_ids + fatal_ids
         if to_remove:
-            pending_queue.remove(to_remove)
+            pending_queue.remove_by_chat(to_remove)
             logger.debug("Removed %s messages from pending queue", len(to_remove))
 
         # Handle error status - schedule retry
         if error_ids:
             for item in batch_items:
-                if item['message_id'] in error_ids:
+                item_key = (item['message_id'], item['chat_id'])
+                if item_key in error_ids:
                     pmsg = PendingMessage(
                         message_id=item['message_id'],
                         chat_id=item['chat_id'],
@@ -400,13 +402,13 @@ async def run_bot_mode(
         # Update offset based on max update_id from batch
         if batch_items:
             max_update_id = max(item['update_id'] for item in batch_items if item.get('update_id'))
-            state_mgr.save(state_key, max_update_id)
+            state_mgr.save(max_update_id)
             logger.debug("Updated offset to %s", max_update_id)
 
     batcher.on_batch = process_batch
 
     # Load last offset
-    state = state_mgr.load(state_key)
+    state = state_mgr.load()
     offset = state.get('last_update_id', 0)
 
     # Load and replay pending messages on startup

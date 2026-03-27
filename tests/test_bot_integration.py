@@ -157,7 +157,7 @@ class TestBotModeIntegration:
             state_mgr = BotStateManager(tmpdir)
 
             # Initial state
-            state = state_mgr.load(456)
+            state = state_mgr.load()
             assert state["last_update_id"] == 0
 
             # Simulate processing updates
@@ -175,10 +175,10 @@ class TestBotModeIntegration:
                     formatted_messages.append(json.loads(formatted))
 
             # Save state
-            state_mgr.save(456, 2)
+            state_mgr.save(2)
 
             # Verify state
-            state = state_mgr.load(456)
+            state = state_mgr.load()
             assert state["last_update_id"] == 2
 
             # Verify messages
@@ -195,7 +195,7 @@ class TestPersistenceIntegration:
     async def test_pending_messages_replayed_on_startup(self):
         """Test that pending messages are replayed when bot restarts."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            pending_queue = PendingQueue(chat_id=456, state_dir=tmpdir)
+            pending_queue = PendingQueue(state_dir=tmpdir)
 
             # Simulate previous session with pending messages
             msg1 = PendingMessage(
@@ -227,7 +227,7 @@ class TestPersistenceIntegration:
     async def test_successful_processing_removes_from_pending(self):
         """Test that successful processing removes messages from pending queue."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            pending_queue = PendingQueue(chat_id=456, state_dir=tmpdir)
+            pending_queue = PendingQueue(state_dir=tmpdir)
 
             # Add messages
             for i in range(3):
@@ -249,8 +249,8 @@ class TestPersistenceIntegration:
     async def test_failed_processor_moves_to_dead_letter(self):
         """Test that messages failing 3 times go to dead-letter queue."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            pending_queue = PendingQueue(chat_id=456, state_dir=tmpdir)
-            dead_path = str(Path(tmpdir) / "bot_456_dead.jsonl")
+            pending_queue = PendingQueue(state_dir=tmpdir)
+            dead_path = str(Path(tmpdir) / "bot_dead.jsonl")
             dead_queue = DeadLetterQueue(dead_path)
 
             msg = PendingMessage(
@@ -286,7 +286,7 @@ class TestPersistenceIntegration:
     async def test_retry_dead_removes_successful(self):
         """Test that --retry-dead removes successful retries from dead-letter file."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            dead_path = str(Path(tmpdir) / "bot_456_dead.jsonl")
+            dead_path = str(Path(tmpdir) / "bot_dead.jsonl")
             dead_queue = DeadLetterQueue(dead_path)
 
             # Add multiple dead letters
@@ -312,7 +312,7 @@ class TestPersistenceIntegration:
     async def test_full_persistence_flow_with_mocked_processor(self):
         """Test the full persistence flow: receive -> pending -> process -> remove."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            pending_queue = PendingQueue(chat_id=456, state_dir=tmpdir)
+            pending_queue = PendingQueue(state_dir=tmpdir)
             batch_results = []
 
             async def mock_processor(messages):
@@ -359,8 +359,8 @@ class TestPersistenceIntegration:
     async def test_processor_crash_triggers_retry(self):
         """Test that processor crash schedules a retry."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            pending_queue = PendingQueue(chat_id=456, state_dir=tmpdir)
-            dead_path = str(Path(tmpdir) / "bot_456_dead.jsonl")
+            pending_queue = PendingQueue(state_dir=tmpdir)
+            dead_path = str(Path(tmpdir) / "bot_dead.jsonl")
             dead_queue = DeadLetterQueue(dead_path)
 
             call_count = 0
@@ -429,8 +429,8 @@ class TestPersistenceIntegration:
     async def test_fatal_status_not_retried_goes_to_fatal_queue(self):
         """Test that processor returning status=fatal is not retried and goes to fatal queue."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            pending_queue = PendingQueue(chat_id=456, state_dir=tmpdir)
-            dead_path = str(Path(tmpdir) / "bot_456_dead.jsonl")
+            pending_queue = PendingQueue(state_dir=tmpdir)
+            dead_path = str(Path(tmpdir) / "bot_dead.jsonl")
             dead_queue = DeadLetterQueue(dead_path)
             fatal_path = str(Path(tmpdir) / "bot_456_fatal.jsonl")
             fatal_queue = FatalQueue(fatal_path)
@@ -492,8 +492,8 @@ class TestPersistenceIntegration:
     async def test_error_status_triggers_retry(self):
         """Test that processor returning status=error triggers retry logic."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            pending_queue = PendingQueue(chat_id=456, state_dir=tmpdir)
-            dead_path = str(Path(tmpdir) / "bot_456_dead.jsonl")
+            pending_queue = PendingQueue(state_dir=tmpdir)
+            dead_path = str(Path(tmpdir) / "bot_dead.jsonl")
             dead_queue = DeadLetterQueue(dead_path)
 
             call_count = 0
@@ -562,8 +562,8 @@ class TestPersistenceIntegration:
     async def test_three_status_distinction(self):
         """Test that success, error, and fatal are handled differently."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            pending_queue = PendingQueue(chat_id=456, state_dir=tmpdir)
-            dead_path = str(Path(tmpdir) / "bot_456_dead.jsonl")
+            pending_queue = PendingQueue(state_dir=tmpdir)
+            dead_path = str(Path(tmpdir) / "bot_dead.jsonl")
             dead_queue = DeadLetterQueue(dead_path)
             fatal_path = str(Path(tmpdir) / "bot_456_fatal.jsonl")
             fatal_queue = FatalQueue(fatal_path)
