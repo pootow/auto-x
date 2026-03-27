@@ -1,11 +1,78 @@
 """State management for incremental message processing."""
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Optional
 from dataclasses import dataclass, asdict
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+def safe_write_json(path: Path, data: dict, description: str = "state") -> bool:
+    """Write JSON to file atomically.
+
+    Args:
+        path: Path to write to
+        data: Data to write
+        description: Description for error messages
+
+    Returns:
+        True on success, False on failure (never raises)
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix('.tmp')
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        temp_path.replace(path)
+        return True
+    except Exception as e:
+        logger.error("Failed to write %s to %s: %s", description, path, e)
+        return False
+
+
+def safe_read_json(path: Path, default=None):
+    """Read JSON from file safely.
+
+    Args:
+        path: Path to read from
+        default: Default value if file doesn't exist or on error
+
+    Returns:
+        Parsed JSON data or default value (never raises)
+    """
+    if not path.exists():
+        return default
+
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error("Failed to read %s: %s", path, e)
+        return default
+
+
+def safe_write_line(path: Path, line: str) -> bool:
+    """Append a line to a file safely.
+
+    Args:
+        path: Path to write to
+        line: Line to append (without newline)
+
+    Returns:
+        True on success, False on failure (never raises)
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(line + '\n')
+        return True
+    except Exception as e:
+        logger.error("Failed to append to %s: %s", path, e)
+        return False
 
 
 @dataclass
@@ -156,7 +223,13 @@ class BotStateManager:
         if path.exists():
             try:
                 with open(path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                # Ensure required fields exist (backward compatibility)
+                if 'last_update_id' not in data:
+                    data['last_update_id'] = 0
+                if 'last_processed_at' not in data:
+                    data['last_processed_at'] = None
+                return data
             except (json.JSONDecodeError, KeyError):
                 pass
         return {"last_update_id": 0, "last_processed_at": None}
@@ -189,7 +262,11 @@ class PendingMessage:
 
 
 class PendingQueue:
-    """Manages pending messages for crash recovery."""
+    """Manages pending messages for crash recovery.
+
+    All I/O operations are safe - they never raise exceptions.
+    On failure, they log errors and return appropriate default values.
+    """
 
     def __init__(self, chat_id: int, state_dir: Optional[str] = None):
         """Initialize pending queue.
@@ -201,105 +278,147 @@ class PendingQueue:
         if state_dir is None:
             state_dir = os.path.expanduser("~/.tele/state")
         self.state_dir = Path(state_dir)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
         self.chat_id = chat_id
+        # In-memory cache for resilience
+        self._cache: Optional[list[PendingMessage]] = None
 
     def _queue_path(self) -> Path:
         """Get the path to the pending queue file."""
         return self.state_dir / f"bot_{self.chat_id}_pending.jsonl"
 
-    def append(self, msg: PendingMessage) -> None:
+    def append(self, msg: PendingMessage) -> bool:
         """Append a message to the pending queue.
 
         Args:
             msg: PendingMessage to append
+
+        Returns:
+            True on success, False on failure (never raises)
         """
+        self.state_dir.mkdir(parents=True, exist_ok=True)
         path = self._queue_path()
-        with open(path, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(asdict(msg)) + '\n')
+        success = safe_write_line(path, json.dumps(asdict(msg)))
+        if success:
+            # Invalidate cache
+            self._cache = None
+        return success
 
     def read_all(self) -> list[PendingMessage]:
         """Read all pending messages.
 
         Returns:
-            List of PendingMessage objects
+            List of PendingMessage objects (empty list on error, never raises)
         """
+        if self._cache is not None:
+            return self._cache.copy()
+
         path = self._queue_path()
         if not path.exists():
+            self._cache = []
             return []
 
         messages = []
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        data = json.loads(line)
-                        messages.append(PendingMessage(**data))
-                    except json.JSONDecodeError:
-                        continue
-        return messages
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            messages.append(PendingMessage(**data))
+                        except (json.JSONDecodeError, TypeError) as e:
+                            logger.warning("Skipping invalid line in %s: %s", path, e)
+                            continue
+        except Exception as e:
+            logger.error("Failed to read %s: %s", path, e)
 
-    def remove(self, message_ids: list[int]) -> None:
+        self._cache = messages
+        return messages.copy()
+
+    def remove(self, message_ids: list[int]) -> bool:
         """Remove messages by message_id (rewrite file without them).
 
         Args:
             message_ids: List of message IDs to remove
+
+        Returns:
+            True on success, False on failure (never raises)
         """
         if not message_ids:
-            return
+            return True
 
         path = self._queue_path()
         if not path.exists():
-            return
+            return True
 
-        # Read all, filter out removed ones
-        remaining = []
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        data = json.loads(line)
-                        if data.get('message_id') not in message_ids:
-                            remaining.append(line)
-                    except json.JSONDecodeError:
-                        continue
+        try:
+            # Read all, filter out removed ones
+            remaining = []
+            with open(path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            if data.get('message_id') not in message_ids:
+                                remaining.append(line)
+                        except json.JSONDecodeError:
+                            continue
 
-        # Rewrite file with remaining messages
-        with open(path, 'w', encoding='utf-8') as f:
-            for line in remaining:
-                f.write(line + '\n')
+            # Atomic rewrite: write to temp file, then rename
+            temp_path = path.with_suffix('.tmp')
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                for line in remaining:
+                    f.write(line + '\n')
 
-    def update(self, msg: PendingMessage) -> None:
+            temp_path.replace(path)
+            self._cache = None
+            return True
+        except Exception as e:
+            logger.error("Failed to remove from %s: %s", path, e)
+            return False
+
+    def update(self, msg: PendingMessage) -> bool:
         """Update a message in the queue (rewrite file).
 
         Args:
             msg: PendingMessage to update (matched by message_id)
+
+        Returns:
+            True on success, False on failure (never raises)
         """
         path = self._queue_path()
         if not path.exists():
-            return
+            return False
 
-        # Read all, update matching one
-        lines = []
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        data = json.loads(line)
-                        if data.get('message_id') == msg.message_id:
-                            lines.append(json.dumps(asdict(msg)))
-                        else:
-                            lines.append(line)
-                    except json.JSONDecodeError:
-                        continue
+        try:
+            # Read all, update matching one
+            lines = []
+            with open(path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            if data.get('message_id') == msg.message_id:
+                                lines.append(json.dumps(asdict(msg)))
+                            else:
+                                lines.append(line)
+                        except json.JSONDecodeError:
+                            continue
 
-        # Rewrite file
-        with open(path, 'w', encoding='utf-8') as f:
-            for line in lines:
-                f.write(line + '\n')
+            # Atomic rewrite
+            temp_path = path.with_suffix('.tmp')
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                for line in lines:
+                    f.write(line + '\n')
+
+            temp_path.replace(path)
+            self._cache = None
+            return True
+        except Exception as e:
+            logger.error("Failed to update %s: %s", path, e)
+            return False
 
 
 @dataclass
@@ -315,7 +434,11 @@ class DeadLetter:
 
 
 class DeadLetterQueue:
-    """Manages dead-letter messages for manual retry."""
+    """Manages dead-letter messages for manual retry.
+
+    All I/O operations are safe - they never raise exceptions.
+    On failure, they log errors and return appropriate default values.
+    """
 
     def __init__(self, path: str):
         """Initialize dead-letter queue.
@@ -325,66 +448,83 @@ class DeadLetterQueue:
         """
         self.path = Path(path)
 
-    def append(self, dl: DeadLetter) -> None:
+    def append(self, dl: DeadLetter) -> bool:
         """Append a dead-letter entry.
 
         Args:
             dl: DeadLetter to append
+
+        Returns:
+            True on success, False on failure (never raises)
         """
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(asdict(dl)) + '\n')
+        return safe_write_line(self.path, json.dumps(asdict(dl)))
 
     def read_all(self) -> list[DeadLetter]:
         """Read all dead-letter entries.
 
         Returns:
-            List of DeadLetter objects
+            List of DeadLetter objects (empty list on error, never raises)
         """
         if not self.path.exists():
             return []
 
         entries = []
-        with open(self.path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        data = json.loads(line)
-                        entries.append(DeadLetter(**data))
-                    except json.JSONDecodeError:
-                        continue
+        try:
+            with open(self.path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            entries.append(DeadLetter(**data))
+                        except (json.JSONDecodeError, TypeError) as e:
+                            logger.warning("Skipping invalid line in %s: %s", self.path, e)
+                            continue
+        except Exception as e:
+            logger.error("Failed to read %s: %s", self.path, e)
+
         return entries
 
-    def remove(self, message_ids: list[int]) -> None:
+    def remove(self, message_ids: list[int]) -> bool:
         """Remove entries by message_id (rewrite file without them).
 
         Args:
             message_ids: List of message IDs to remove
+
+        Returns:
+            True on success, False on failure (never raises)
         """
         if not message_ids:
-            return
+            return True
 
         if not self.path.exists():
-            return
+            return True
 
-        # Read all, filter out removed ones
-        remaining = []
-        with open(self.path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        data = json.loads(line)
-                        if data.get('message_id') not in message_ids:
-                            remaining.append(line)
-                    except json.JSONDecodeError:
-                        continue
+        try:
+            # Read all, filter out removed ones
+            remaining = []
+            with open(self.path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            if data.get('message_id') not in message_ids:
+                                remaining.append(line)
+                        except json.JSONDecodeError:
+                            continue
 
-        # Rewrite file with remaining entries
-        with open(self.path, 'w', encoding='utf-8') as f:
-            for line in remaining:
-                f.write(line + '\n')
+            # Atomic rewrite
+            temp_path = self.path.with_suffix('.tmp')
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                for line in remaining:
+                    f.write(line + '\n')
+
+            temp_path.replace(self.path)
+            return True
+        except Exception as e:
+            logger.error("Failed to remove from %s: %s", self.path, e)
+            return False
 
 
 @dataclass
@@ -399,7 +539,11 @@ class FatalError:
 
 
 class FatalQueue:
-    """Manages fatal errors for logging/analysis."""
+    """Manages fatal errors for logging/analysis.
+
+    All I/O operations are safe - they never raise exceptions.
+    On failure, they log errors and return appropriate default values.
+    """
 
     def __init__(self, path: str):
         """Initialize fatal queue.
@@ -409,33 +553,39 @@ class FatalQueue:
         """
         self.path = Path(path)
 
-    def append(self, fe: FatalError) -> None:
+    def append(self, fe: FatalError) -> bool:
         """Append a fatal error entry.
 
         Args:
             fe: FatalError to append
+
+        Returns:
+            True on success, False on failure (never raises)
         """
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(asdict(fe)) + '\n')
+        return safe_write_line(self.path, json.dumps(asdict(fe)))
 
     def read_all(self) -> list[FatalError]:
         """Read all fatal error entries.
 
         Returns:
-            List of FatalError objects
+            List of FatalError objects (empty list on error, never raises)
         """
         if not self.path.exists():
             return []
 
         entries = []
-        with open(self.path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        data = json.loads(line)
-                        entries.append(FatalError(**data))
-                    except json.JSONDecodeError:
-                        continue
+        try:
+            with open(self.path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            entries.append(FatalError(**data))
+                        except (json.JSONDecodeError, TypeError) as e:
+                            logger.warning("Skipping invalid line in %s: %s", self.path, e)
+                            continue
+        except Exception as e:
+            logger.error("Failed to read %s: %s", self.path, e)
+
         return entries

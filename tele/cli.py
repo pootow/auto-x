@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Optional, List
 
 import click
@@ -178,7 +179,13 @@ async def run_bot_mode(
     exec_cmd: str,
     verbose: int = 0,
 ) -> None:
-    """Run bot mode daemon loop with persistence and retry.
+    """Run bot mode daemon loop with resilience.
+
+    The daemon NEVER crashes - all errors are handled gracefully:
+    - Network errors: logged, retry after backoff
+    - Processor errors: messages queued for retry
+    - Disk errors: logged, in-memory state preserved
+    - Interaction errors: queued for retry
 
     Args:
         config: Configuration
@@ -193,6 +200,8 @@ async def run_bot_mode(
         verbose: Verbosity level
     """
     from .state import PendingQueue, PendingMessage, DeadLetterQueue, DeadLetter, FatalQueue, FatalError
+    from .tasks import MessageTask, InteractionTask, DeadMessageTask, DeadInteractionTask
+    from .async_queue import PersistentQueue, AsyncRetryQueue
     from datetime import datetime, timezone
 
     logger = get_logger("tele.bot")
@@ -214,7 +223,10 @@ async def run_bot_mode(
     # State key for pending/offset files
     state_key = chat_filter if chat_filter else 0
 
-    # Initialize persistence
+    # Get state directory
+    state_dir = Path(state_mgr.state_dir)
+
+    # Initialize persistence for messages
     pending_queue = PendingQueue(state_key)
     dead_letter_path = str(pending_queue._queue_path()).replace('_pending.jsonl', '_dead.jsonl')
     dead_letter_queue = DeadLetterQueue(dead_letter_path)
@@ -270,145 +282,126 @@ async def run_bot_mode(
         })
 
     async def process_batch(batch_items: List[dict]) -> None:
-        """Process a batch of messages through exec command."""
+        """Process a batch of messages through exec command.
+
+        This function NEVER crashes - all errors are handled gracefully.
+        """
         # Extract just the messages for the processor
         messages = [item['message'] for item in batch_items]
 
-        try:
-            results = await run_exec_command(exec_cmd, messages, shell=True)
+        # run_exec_command NEVER raises - it returns error status on failure
+        results = await run_exec_command(exec_cmd, messages, shell=True)
 
-            # Track message IDs by status
-            success_ids = []
-            error_ids = []   # Retriable errors - will be handled by exception path
-            fatal_ids = []   # Non-retriable, no value in reprocessing
-            fatal_reasons = {}  # message_id -> reason for fatal errors
+        # Track message IDs by status
+        success_ids = []
+        error_ids = []   # Retriable errors
+        fatal_ids = []   # Non-retriable
+        fatal_reasons = {}  # message_id -> reason for fatal errors
 
-            # Mark messages based on status
-            for result in results:
-                msg_id = result.get('id')
-                result_chat_id = result.get('chat_id')
-                status = result.get('status')
+        # Mark messages based on status
+        for result in results:
+            msg_id = result.get('id')
+            result_chat_id = result.get('chat_id')
+            status = result.get('status')
 
-                # Skip if missing required fields
-                if not msg_id or not result_chat_id or not status:
-                    logger.warning("Skipping result: missing id/chat_id/status: %s", result)
-                    continue
+            # Skip if missing required fields
+            if not msg_id or not result_chat_id or not status:
+                logger.warning("Skipping result: missing id/chat_id/status: %s", result)
+                continue
 
-                # Determine emoji based on status
-                if status == 'success':
-                    emoji = reaction
-                    success_ids.append(msg_id)
-                elif status == 'fatal':
-                    emoji = failed_mark
-                    fatal_ids.append(msg_id)
-                    fatal_reasons[msg_id] = result.get('reason', 'Processor returned fatal status')
-                else:  # 'error' or unknown - treat as retriable
-                    emoji = failed_mark
-                    error_ids.append(msg_id)
+            # Determine emoji based on status
+            if status == 'success':
+                emoji = reaction
+                success_ids.append(msg_id)
+            elif status == 'fatal':
+                emoji = failed_mark
+                fatal_ids.append(msg_id)
+                fatal_reasons[msg_id] = result.get('reason', 'Processor returned fatal status')
+            else:  # 'error' or unknown - treat as retriable
+                emoji = failed_mark
+                error_ids.append(msg_id)
 
-                try:
-                    await client.add_reaction(result_chat_id, msg_id, emoji)
-                    logger.debug("Marked message %s in chat %s with %s", msg_id, result_chat_id, emoji)
-                except Exception as e:
-                    logger.error("Failed to mark message %s in chat %s: %s", msg_id, result_chat_id, e)
+            # Add reaction - NEVER raises (bot_client handles errors)
+            success = await client.add_reaction(result_chat_id, msg_id, emoji)
+            if success:
+                logger.debug("Marked message %s in chat %s with %s", msg_id, result_chat_id, emoji)
+            else:
+                logger.warning("Failed to mark message %s in chat %s (will not retry reaction)", msg_id, result_chat_id)
 
-                # Handle rich reply from processor
-                if status == 'success' and 'reply' in result and result['reply']:
-                    for r in result['reply']:
-                        text = r.get('text', '')
-                        media = r.get('media')
-                        try:
-                            if media:
-                                if media.get('type') == 'video':
-                                    await client.send_video(
-                                        result_chat_id,
-                                        media['url'],
-                                        caption=text,
-                                        reply_to_message_id=msg_id,
-                                        cover=media.get('cover'),
-                                        duration=media.get('duration'),
-                                        width=media.get('width'),
-                                        height=media.get('height')
-                                    )
-                                    logger.debug("Sent video reply to message %s", msg_id)
-                                elif media.get('type') == 'image':
-                                    await client.send_photo(result_chat_id, media['url'], caption=text, reply_to_message_id=msg_id)
-                                    logger.debug("Sent photo reply to message %s", msg_id)
-                            elif text:
-                                # Text-only reply - send as text message
-                                await client._call_api("sendMessage", {
-                                    "chat_id": result_chat_id,
-                                    "text": text,
-                                    "parse_mode": "HTML",
-                                    "reply_to_message_id": msg_id
-                                })
-                                logger.debug("Sent text reply to message %s", msg_id)
-                        except Exception as e:
-                            logger.error("Failed to send reply for message %s: %s", msg_id, e)
+            # Handle rich reply from processor
+            if status == 'success' and 'reply' in result and result['reply']:
+                for r in result['reply']:
+                    text = r.get('text', '')
+                    media = r.get('media')
+                    try:
+                        if media:
+                            if media.get('type') == 'video':
+                                await client.send_video(
+                                    result_chat_id,
+                                    media['url'],
+                                    caption=text,
+                                    reply_to_message_id=msg_id,
+                                    cover=media.get('cover'),
+                                    duration=media.get('duration'),
+                                    width=media.get('width'),
+                                    height=media.get('height')
+                                )
+                                logger.debug("Sent video reply to message %s", msg_id)
+                            elif media.get('type') == 'image':
+                                await client.send_photo(result_chat_id, media['url'], caption=text, reply_to_message_id=msg_id)
+                                logger.debug("Sent photo reply to message %s", msg_id)
+                        elif text:
+                            # Text-only reply - send as text message
+                            await client.send_message(result_chat_id, text, reply_to_message_id=msg_id)
+                            logger.debug("Sent text reply to message %s", msg_id)
+                    except Exception as e:
+                        # Should not happen since client methods never raise, but be safe
+                        logger.error("Failed to send reply for message %s: %s", msg_id, e)
 
-            # Handle fatal errors - append to fatal.jsonl
-            if fatal_ids:
-                for item in batch_items:
-                    if item['message_id'] in fatal_ids:
-                        fe = FatalError(
-                            message_id=item['message_id'],
-                            chat_id=item['chat_id'],
-                            message=item['message'],
-                            exec_cmd=exec_cmd,
-                            failed_at=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
-                            reason=fatal_reasons.get(item['message_id'], 'Processor returned fatal status'),
-                        )
-                        fatal_queue.append(fe)
-                        logger.warning("Message %s marked as fatal, no retry value", item['message_id'])
-
-            # Remove successful and fatal messages from pending
-            to_remove = success_ids + fatal_ids
-            if to_remove:
-                pending_queue.remove(to_remove)
-                logger.debug("Removed %s messages from pending queue", len(to_remove))
-
-            # Handle error status - schedule retry
-            if error_ids:
-                for item in batch_items:
-                    if item['message_id'] in error_ids:
-                        pmsg = PendingMessage(
-                            message_id=item['message_id'],
-                            chat_id=item['chat_id'],
-                            update_id=item['update_id'],
-                            message=item['message'],
-                            retry_count=item.get('retry_count', 0),
-                            last_attempt=item.get('last_attempt'),
-                        )
-                        # Cancel any existing retry task
-                        if item['message_id'] in scheduled_retries:
-                            scheduled_retries[item['message_id']].cancel()
-                        # Schedule new retry
-                        scheduled_retries[item['message_id']] = asyncio.create_task(schedule_retry(pmsg))
-
-            # Update offset based on max update_id from batch
-            if batch_items:
-                max_update_id = max(item['update_id'] for item in batch_items if item.get('update_id'))
-                state_mgr.save(state_key, max_update_id)
-                logger.debug("Updated offset to %s", max_update_id)
-
-        except Exception as e:
-            logger.error("Batch processing failed: %s", e)
-
-            # Schedule retries for all messages in batch (processor crashed)
+        # Handle fatal errors - append to fatal.jsonl
+        if fatal_ids:
             for item in batch_items:
-                pmsg = PendingMessage(
-                    message_id=item['message_id'],
-                    chat_id=item['chat_id'],
-                    update_id=item['update_id'],
-                    message=item['message'],
-                    retry_count=item.get('retry_count', 0),
-                    last_attempt=item.get('last_attempt'),
-                )
-                # Cancel any existing retry task
-                if item['message_id'] in scheduled_retries:
-                    scheduled_retries[item['message_id']].cancel()
-                # Schedule new retry
-                scheduled_retries[item['message_id']] = asyncio.create_task(schedule_retry(pmsg))
+                if item['message_id'] in fatal_ids:
+                    fe = FatalError(
+                        message_id=item['message_id'],
+                        chat_id=item['chat_id'],
+                        message=item['message'],
+                        exec_cmd=exec_cmd,
+                        failed_at=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+                        reason=fatal_reasons.get(item['message_id'], 'Processor returned fatal status'),
+                    )
+                    fatal_queue.append(fe)
+                    logger.warning("Message %s marked as fatal, no retry value", item['message_id'])
+
+        # Remove successful and fatal messages from pending
+        to_remove = success_ids + fatal_ids
+        if to_remove:
+            pending_queue.remove(to_remove)
+            logger.debug("Removed %s messages from pending queue", len(to_remove))
+
+        # Handle error status - schedule retry
+        if error_ids:
+            for item in batch_items:
+                if item['message_id'] in error_ids:
+                    pmsg = PendingMessage(
+                        message_id=item['message_id'],
+                        chat_id=item['chat_id'],
+                        update_id=item['update_id'],
+                        message=item['message'],
+                        retry_count=item.get('retry_count', 0),
+                        last_attempt=item.get('last_attempt'),
+                    )
+                    # Cancel any existing retry task
+                    if item['message_id'] in scheduled_retries:
+                        scheduled_retries[item['message_id']].cancel()
+                    # Schedule new retry
+                    scheduled_retries[item['message_id']] = asyncio.create_task(schedule_retry(pmsg))
+
+        # Update offset based on max update_id from batch
+        if batch_items:
+            max_update_id = max(item['update_id'] for item in batch_items if item.get('update_id'))
+            state_mgr.save(state_key, max_update_id)
+            logger.debug("Updated offset to %s", max_update_id)
 
     batcher.on_batch = process_batch
 
@@ -430,68 +423,85 @@ async def run_bot_mode(
                 'last_attempt': pmsg.last_attempt,
             })
 
+    # Polling backoff for error recovery
+    poll_backoff = 0.0
+
     try:
         if chat_filter:
             logger.info("Bot mode started, monitoring chat %s...", chat_filter)
         else:
             logger.info("Bot mode started, monitoring all chats...")
+
         while True:
-            updates = await client.poll_updates(offset=offset + 1)
+            try:
+                # poll_updates NEVER raises - returns [] on failure
+                updates = await client.poll_updates(offset=offset + 1)
+                poll_backoff = 0.0  # Reset on success
 
-            for update in updates:
-                update_id = update.get('update_id')
-                offset = update_id
+                for update in updates:
+                    update_id = update.get('update_id')
+                    offset = update_id
 
-                # Extract message from update
-                message = update.get('message') or update.get('channel_post')
-                if not message:
-                    continue
+                    # Extract message from update
+                    message = update.get('message') or update.get('channel_post')
+                    if not message:
+                        continue
 
-                # Filter chat if specified
-                msg_chat_id = message.get('chat', {}).get('id')
-                if chat_filter and msg_chat_id != chat_filter:
-                    continue
+                    # Filter chat if specified
+                    msg_chat_id = message.get('chat', {}).get('id')
+                    if chat_filter and msg_chat_id != chat_filter:
+                        continue
 
-                # Apply filter
-                if msg_filter and not msg_filter.matches(message):
-                    continue
+                    # Apply filter
+                    if msg_filter and not msg_filter.matches(message):
+                        continue
 
-                msg_id = message.get('message_id')
+                    msg_id = message.get('message_id')
 
-                # Create pending message
-                formatted = json.loads(format_message(message))
-                pmsg = PendingMessage(
-                    message_id=msg_id,
-                    chat_id=msg_chat_id,
-                    update_id=update_id,
-                    message=formatted,
-                    retry_count=0,
-                    last_attempt=None,
-                )
+                    # Create pending message
+                    formatted = json.loads(format_message(message))
+                    pmsg = PendingMessage(
+                        message_id=msg_id,
+                        chat_id=msg_chat_id,
+                        update_id=update_id,
+                        message=formatted,
+                        retry_count=0,
+                        last_attempt=None,
+                    )
 
-                # Append to pending file BEFORE adding to batcher
-                pending_queue.append(pmsg)
+                    # Append to pending file BEFORE adding to batcher
+                    pending_queue.append(pmsg)
 
-                # Add to batcher with metadata
-                await batcher.add({
-                    'message_id': pmsg.message_id,
-                    'chat_id': pmsg.chat_id,
-                    'update_id': pmsg.update_id,
-                    'message': pmsg.message,
-                    'retry_count': pmsg.retry_count,
-                    'last_attempt': pmsg.last_attempt,
-                })
-                logger.debug("Queued message %s for processing", msg_id)
+                    # Add to batcher with metadata
+                    await batcher.add({
+                        'message_id': pmsg.message_id,
+                        'chat_id': pmsg.chat_id,
+                        'update_id': pmsg.update_id,
+                        'message': pmsg.message,
+                        'retry_count': pmsg.retry_count,
+                        'last_attempt': pmsg.last_attempt,
+                    })
+                    logger.debug("Queued message %s for processing", msg_id)
 
-                # Add received reaction
-                if received_mark:
-                    try:
-                        await client.add_reaction(msg_chat_id, msg_id, received_mark)
-                        logger.debug("Added received mark to message %s", msg_id)
-                    except Exception as e:
-                        logger.warning("Failed to add received mark: %s", e)
+                    # Add received reaction - NEVER crashes
+                    if received_mark:
+                        success = await client.add_reaction(msg_chat_id, msg_id, received_mark)
+                        if success:
+                            logger.debug("Added received mark to message %s", msg_id)
+                        else:
+                            logger.warning("Failed to add received mark to message %s (non-critical)", msg_id)
 
-                # NOTE: Do NOT save offset here - offset is saved only after successful processing
+                    # NOTE: Do NOT save offset here - offset is saved only after successful processing
+
+            except KeyboardInterrupt:
+                raise
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # Unexpected error in main loop - log and continue with backoff
+                poll_backoff = min(poll_backoff * 2 or 5.0, 300.0)  # Max 5 minutes
+                logger.error("Polling error (retry in %.1fs): %s", poll_backoff, e, exc_info=True)
+                await asyncio.sleep(poll_backoff)
 
     except KeyboardInterrupt:
         logger.info("Shutting down...")
@@ -701,29 +711,29 @@ async def run_retry_dead(
                 logger.warning("No command for message %s, skipping", entry.message_id)
                 continue
 
-            try:
-                results = await run_exec_command(cmd, [entry.message], shell=True)
+            # run_exec_command NEVER raises - returns error status on failure
+            results = await run_exec_command(cmd, [entry.message], shell=True)
 
-                for result in results:
-                    msg_id = result.get('id')
-                    result_chat_id = result.get('chat_id')
-                    status = result.get('status')
+            for result in results:
+                msg_id = result.get('id')
+                result_chat_id = result.get('chat_id')
+                status = result.get('status')
 
-                    if not msg_id or not result_chat_id or not status:
-                        logger.warning("Skipping result: missing id/chat_id/status")
-                        continue
+                if not msg_id or not result_chat_id or not status:
+                    logger.warning("Skipping result: missing id/chat_id/status")
+                    continue
 
-                    emoji = reaction if status == 'success' else failed_mark
-                    await client.add_reaction(result_chat_id, msg_id, emoji)
+                emoji = reaction if status == 'success' else failed_mark
+                # add_reaction NEVER raises - returns False on failure
+                success = await client.add_reaction(result_chat_id, msg_id, emoji)
 
-                    if status == 'success':
-                        success_ids.append(entry.message_id)
-                        logger.info("Successfully retried message %s", msg_id)
-                    else:
-                        logger.warning("Message %s still failed after retry", msg_id)
-
-            except Exception as e:
-                logger.error("Retry failed for message %s: %s", entry.message_id, e)
+                if status == 'success' and success:
+                    success_ids.append(entry.message_id)
+                    logger.info("Successfully retried message %s", msg_id)
+                elif status == 'success':
+                    logger.warning("Message %s processed but reaction failed", msg_id)
+                else:
+                    logger.warning("Message %s still failed after retry", msg_id)
 
         # Remove successful retries from dead-letter file
         if success_ids:

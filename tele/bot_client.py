@@ -78,15 +78,15 @@ class BotClient:
     async def _call_api(self, method: str, params: dict = None) -> dict:
         """Call Bot API method with automatic retry on transient failures.
 
+        This method NEVER raises exceptions - it returns an empty dict on failure.
+        This ensures the daemon never crashes due to API failures.
+
         Args:
             method: API method name
             params: Method parameters
 
         Returns:
-            API response data
-
-        Raises:
-            RuntimeError: If API call fails after all retries
+            API response data, or {} on failure (never raises)
         """
         try:
             return await retry_async(
@@ -99,17 +99,28 @@ class BotClient:
             # Reset session on persistent failures
             logger.warning("API call failed after retries, resetting session: %s", e)
             await self._reset_session()
-            raise RuntimeError(f"API call failed: {e}") from e
+            return {}
+        except RuntimeError as e:
+            # API error response
+            logger.error("API error: %s", e)
+            return {}
+        except Exception as e:
+            # Unexpected error - log and return empty
+            logger.error("Unexpected API error: %s", e, exc_info=True)
+            return {}
 
     async def poll_updates(self, offset: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
         """Poll for new updates using long polling.
+
+        This method NEVER raises exceptions - it returns an empty list on failure.
+        This ensures the daemon never crashes due to polling failures.
 
         Args:
             offset: Start from this update_id
             limit: Max updates to fetch
 
         Returns:
-            List of update objects
+            List of update objects, or [] on failure (never raises)
         """
         params = {
             "offset": offset,
@@ -117,10 +128,16 @@ class BotClient:
             "timeout": self.timeout,
             "allowed_updates": ["message", "channel_post"]
         }
-        updates = await self._call_api("getUpdates", params)
-        if updates:
-            logger.debug("Received %s updates", len(updates))
-        return updates
+        try:
+            updates = await self._call_api("getUpdates", params)
+            if updates and isinstance(updates, list):
+                logger.debug("Received %s updates", len(updates))
+                return updates
+            return []
+        except Exception as e:
+            # Should not happen since _call_api never raises, but be safe
+            logger.error("Unexpected error in poll_updates: %s", e)
+            return []
 
     async def add_reaction(
         self,
@@ -130,21 +147,24 @@ class BotClient:
     ) -> bool:
         """Add reaction to a message.
 
+        This method NEVER raises exceptions - it returns False on failure.
+        This ensures the daemon never crashes due to reaction failures.
+
         Args:
             chat_id: Target chat ID
             message_id: Message ID
             emoji: Reaction emoji
 
         Returns:
-            True if successful
+            True if successful, False on failure (never raises)
         """
         logger.debug("Adding reaction %s to message %s in chat %s", emoji, message_id, chat_id)
-        await self._call_api("setMessageReaction", {
+        result = await self._call_api("setMessageReaction", {
             "chat_id": chat_id,
             "message_id": message_id,
             "reaction": [{"type": "emoji", "emoji": emoji}]
         })
-        return True
+        return bool(result)
 
     async def send_video(
         self,
@@ -159,6 +179,9 @@ class BotClient:
     ) -> dict:
         """Send a video by URL.
 
+        This method NEVER raises exceptions - it returns an empty dict on failure.
+        This ensures the daemon never crashes due to video send failures.
+
         Args:
             chat_id: Target chat ID
             video: Video URL or file_id
@@ -170,7 +193,7 @@ class BotClient:
             height: Optional video height
 
         Returns:
-            Sent message object
+            Sent message object, or {} on failure (never raises)
         """
         params = {
             "chat_id": chat_id,
@@ -203,6 +226,9 @@ class BotClient:
     ) -> dict:
         """Send a photo by URL.
 
+        This method NEVER raises exceptions - it returns an empty dict on failure.
+        This ensures the daemon never crashes due to photo send failures.
+
         Args:
             chat_id: Target chat ID
             photo: Photo URL or file_id
@@ -210,7 +236,7 @@ class BotClient:
             reply_to_message_id: Optional message ID to reply to
 
         Returns:
-            Sent message object
+            Sent message object, or {} on failure (never raises)
         """
         params = {
             "chat_id": chat_id,
@@ -224,3 +250,35 @@ class BotClient:
 
         logger.debug("Sending photo to chat %s", chat_id)
         return await self._call_api("sendPhoto", params)
+
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_to_message_id: Optional[int] = None,
+        parse_mode: str = "HTML"
+    ) -> dict:
+        """Send a text message.
+
+        This method NEVER raises exceptions - it returns an empty dict on failure.
+        This ensures the daemon never crashes due to message send failures.
+
+        Args:
+            chat_id: Target chat ID
+            text: Message text
+            reply_to_message_id: Optional message ID to reply to
+            parse_mode: Parse mode for text formatting
+
+        Returns:
+            Sent message object, or {} on failure (never raises)
+        """
+        params = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": parse_mode,
+        }
+        if reply_to_message_id:
+            params["reply_to_message_id"] = reply_to_message_id
+
+        logger.debug("Sending message to chat %s", chat_id)
+        return await self._call_api("sendMessage", params)
