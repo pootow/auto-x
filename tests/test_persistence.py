@@ -700,3 +700,83 @@ class TestInteractionQueue:
         remaining_ids = [(i.id, i.chat_id) for i in items]
         assert (1, 111) not in remaining_ids
         assert (2, 222) not in remaining_ids
+
+    def test_update_by_id_and_chat_prevents_collision(self, tmp_path):
+        """Test that update_by_id_and_chat prevents cross-chat collision.
+
+        When updating one chat's item, another chat's item with same id should not be affected.
+        """
+        pending_path = tmp_path / "interaction_pending.jsonl"
+        queue = PersistentQueue[InteractionTask](
+            path=pending_path,
+            item_class=InteractionTask
+        )
+
+        # Add two items with SAME id but DIFFERENT chat_id
+        queue.append(InteractionTask(
+            id=100,  # Same id
+            chat_id=111,  # Chat A
+            interaction_type='received_mark',
+            data={'emoji': '👀'},
+            retry_count=0,
+        ))
+        queue.append(InteractionTask(
+            id=100,  # Same id
+            chat_id=222,  # Chat B - DIFFERENT
+            interaction_type='received_mark',
+            data={'emoji': '✅'},
+            retry_count=0,
+        ))
+
+        # Update Chat A's item (increment retry_count)
+        task_a_updated = InteractionTask(
+            id=100,
+            chat_id=111,  # Chat A
+            interaction_type='received_mark',
+            data={'emoji': '👀'},
+            retry_count=1,  # Updated
+            last_attempt="2024-01-15T10:00:00Z",
+        )
+        queue.update_by_id_and_chat(task_a_updated)
+
+        items = queue.read_all()
+        assert len(items) == 2, "Both items should still exist"
+
+        # Find each item and verify
+        chat_a_item = next(i for i in items if i.chat_id == 111)
+        chat_b_item = next(i for i in items if i.chat_id == 222)
+
+        assert chat_a_item.retry_count == 1, "Chat A's retry_count should be updated"
+        assert chat_b_item.retry_count == 0, "Chat B's retry_count should be unchanged"
+
+    def test_update_by_id_and_chat_nonexistent(self, tmp_path):
+        """Test update_by_id_and_chat on non-existent item."""
+        pending_path = tmp_path / "interaction_pending.jsonl"
+        queue = PersistentQueue[InteractionTask](
+            path=pending_path,
+            item_class=InteractionTask
+        )
+
+        # Add one item
+        queue.append(InteractionTask(
+            id=1,
+            chat_id=123,
+            interaction_type='received_mark',
+            data={'emoji': '👀'},
+        ))
+
+        # Try to update a non-existent (id, chat_id) combination
+        task_nonexistent = InteractionTask(
+            id=999,
+            chat_id=999,
+            interaction_type='received_mark',
+            data={'emoji': '👀'},
+            retry_count=5,
+        )
+        queue.update_by_id_and_chat(task_nonexistent)
+
+        # Original item should be unchanged
+        items = queue.read_all()
+        assert len(items) == 1
+        assert items[0].id == 1
+        assert items[0].retry_count == 0

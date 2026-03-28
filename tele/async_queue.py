@@ -283,6 +283,64 @@ class PersistentQueue(Generic[T]):
             logger.error("Failed to update %s: %s", self.path, e)
             return False
 
+    def update_by_id_and_chat(self, item: T) -> bool:
+        """Update an item in the queue by (id, chat_id) to prevent cross-chat collision.
+
+        Like remove_by_id_and_chat, this prevents updating the wrong item when
+        multiple chats have items with the same id.
+
+        Args:
+            item: The item to update (matched by id AND chat_id)
+
+        Returns:
+            True on success, False on failure (never raises)
+        """
+        if not self.path.exists():
+            return False
+
+        try:
+            # Convert to dict
+            if hasattr(item, 'to_dict'):
+                new_data = item.to_dict()
+            else:
+                new_data = asdict(item) if hasattr(item, '__dataclass_fields__') else item
+
+            item_id = new_data.get('id')
+            item_chat_id = new_data.get('chat_id')
+            if item_id is None:
+                return False
+
+            # Read all, update matching one by (id, chat_id)
+            lines = []
+            with open(self.path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            # Match by BOTH id AND chat_id
+                            if data.get('id') == item_id and data.get('chat_id') == item_chat_id:
+                                lines.append(json.dumps(new_data))
+                            else:
+                                lines.append(line)
+                        except json.JSONDecodeError:
+                            continue
+
+            # Atomic write
+            temp_path = self.path.with_suffix('.tmp')
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                for line in lines:
+                    f.write(line + '\n')
+
+            temp_path.replace(self.path)
+
+            # Invalidate cache
+            self._cache = None
+            return True
+        except Exception as e:
+            logger.error("Failed to update by (id, chat_id) in %s: %s", self.path, e)
+            return False
+
     def clear(self) -> bool:
         """Clear the queue.
 
@@ -551,7 +609,11 @@ class AsyncRetryQueue(Generic[T]):
                 item.retry_count = retry_count + 1
             if hasattr(item, 'last_attempt'):
                 item.last_attempt = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-            self.pending_queue.update(item)
+            # Use update_by_id_and_chat to prevent cross-chat collision
+            if item_chat_id is not None:
+                self.pending_queue.update_by_id_and_chat(item)
+            else:
+                self.pending_queue.update(item)
             logger.info("Item %s failed, will retry (attempt %s/%s)",
                        item_id, retry_count + 1, self.max_retries)
 
