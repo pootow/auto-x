@@ -3,7 +3,7 @@
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -256,6 +256,7 @@ class PendingMessage:
     retry_count: int = 0
     last_attempt: Optional[str] = None
     ready_at: Optional[str] = None  # ISO timestamp, None = ready immediately
+    created_at: Optional[str] = None  # ISO timestamp when message was queued
 
 
 class PendingQueue:
@@ -288,12 +289,18 @@ class PendingQueue:
     def append(self, msg: PendingMessage) -> bool:
         """Append a message to the pending queue.
 
+        Automatically populates created_at if not set.
+
         Args:
             msg: PendingMessage to append
 
         Returns:
             True on success, False on failure (never raises)
         """
+        # Auto-populate created_at if not set
+        if msg.created_at is None:
+            msg.created_at = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
         self.state_dir.mkdir(parents=True, exist_ok=True)
         path = self._queue_path()
         success = safe_write_line(path, json.dumps(asdict(msg)))
@@ -502,6 +509,77 @@ class PendingQueue:
             return True
         except Exception as e:
             logger.error("Failed to update %s: %s", path, e)
+            return False
+
+    def schedule_retry(
+        self,
+        message_id: int,
+        chat_id: int,
+        backoff_seconds: float,
+    ) -> bool:
+        """Schedule a message for retry with backoff.
+
+        Updates retry_count and sets ready_at to now + backoff_seconds.
+
+        Args:
+            message_id: Message ID to retry
+            chat_id: Chat ID (for cross-chat safety)
+            backoff_seconds: Seconds to wait before retry
+
+        Returns:
+            True on success, False if message not found
+        """
+        messages = self.read_all()
+        for msg in messages:
+            if msg.message_id == message_id and msg.chat_id == chat_id:
+                msg.retry_count += 1
+                msg.ready_at = (
+                    datetime.now(timezone.utc) + timedelta(seconds=backoff_seconds)
+                ).isoformat().replace('+00:00', 'Z')
+                return self.update_by_chat(msg)
+
+        return False
+
+    def update_by_chat(self, msg: PendingMessage) -> bool:
+        """Update a message in the queue by (message_id, chat_id).
+
+        This is the correct method to use - it prevents cross-chat collision.
+
+        Args:
+            msg: PendingMessage to update
+
+        Returns:
+            True on success, False on failure
+        """
+        if not self._queue_path().exists():
+            return False
+
+        try:
+            lines = []
+            with open(self._queue_path(), 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            if (data.get('message_id') == msg.message_id and
+                                data.get('chat_id') == msg.chat_id):
+                                lines.append(json.dumps(asdict(msg)))
+                            else:
+                                lines.append(line)
+                        except json.JSONDecodeError:
+                            continue
+
+            temp_path = self._queue_path().with_suffix('.tmp')
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                for line in lines:
+                    f.write(line + '\n')
+
+            temp_path.replace(self._queue_path())
+            self._cache = None
+            return True
+        except Exception as e:
+            logger.error("Failed to update %s: %s", self._queue_path(), e)
             return False
 
 

@@ -191,3 +191,53 @@ class TestPendingQueue:
 
         ready = queue.read_ready()
         assert len(ready) == 0
+
+    def test_append_auto_populates_created_at(self, tmp_path):
+        """Appending a message should auto-populate created_at if not set."""
+        queue = PendingQueue(state_dir=str(tmp_path))
+
+        msg = PendingMessage(
+            message_id=1, chat_id=123, update_id=100,
+            message={"id": 1}
+        )
+        queue.append(msg)
+
+        messages = queue.read_all()
+        assert messages[0].created_at is not None
+        # Should be recent (within last second)
+        from datetime import datetime, timezone
+        created = datetime.fromisoformat(messages[0].created_at.replace('Z', '+00:00'))
+        now = datetime.now(timezone.utc)
+        diff = (now - created).total_seconds()
+        assert 0 <= diff < 1
+
+    def test_schedule_retry_updates_ready_at(self, tmp_path):
+        """schedule_retry should update ready_at with backoff."""
+        queue = PendingQueue(state_dir=str(tmp_path))
+
+        msg = PendingMessage(
+            message_id=1, chat_id=123, update_id=100,
+            message={"id": 1}, retry_count=0
+        )
+        queue.append(msg)
+
+        # Schedule retry with 5 second backoff
+        queue.schedule_retry(1, 123, backoff_seconds=5.0)
+
+        messages = queue.read_all()
+        assert messages[0].retry_count == 1
+        assert messages[0].ready_at is not None
+
+        # ready_at should be approximately 5 seconds in the future
+        from datetime import datetime, timezone
+        ready = datetime.fromisoformat(messages[0].ready_at.replace('Z', '+00:00'))
+        now = datetime.now(timezone.utc)
+        diff = (ready - now).total_seconds()
+        assert 4.5 < diff < 5.5
+
+    def test_schedule_retry_message_not_found(self, tmp_path):
+        """schedule_retry should return False if message not found."""
+        queue = PendingQueue(state_dir=str(tmp_path))
+
+        result = queue.schedule_retry(999, 999, backoff_seconds=5.0)
+        assert result is False
