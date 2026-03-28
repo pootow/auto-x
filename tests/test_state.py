@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tele.state import StateManager, ChatState, PendingMessage
+from tele.state import StateManager, ChatState, PendingMessage, PendingQueue
 
 
 class TestPendingMessage:
@@ -143,3 +143,51 @@ class TestStateManager:
         manager.update("123456", 75)
         loaded = manager.load("123456")
         assert loaded.last_message_id == 75
+
+
+class TestPendingQueue:
+    """Test cases for PendingQueue."""
+
+    def test_read_ready_returns_messages_with_null_ready_at(self, tmp_path):
+        """Messages with ready_at=None should be returned as ready."""
+        queue = PendingQueue(state_dir=str(tmp_path))
+
+        # Add ready message
+        queue.append(PendingMessage(
+            message_id=1, chat_id=123, update_id=100,
+            message={"id": 1}, ready_at=None
+        ))
+        # Add future message
+        queue.append(PendingMessage(
+            message_id=2, chat_id=123, update_id=101,
+            message={"id": 2}, ready_at="2099-01-01T00:00:00Z"
+        ))
+
+        ready = queue.read_ready()
+        assert len(ready) == 1
+        assert ready[0].message_id == 1
+
+    def test_read_ready_returns_messages_past_ready_time(self, tmp_path):
+        """Messages with ready_at in the past should be returned."""
+        queue = PendingQueue(state_dir=str(tmp_path))
+
+        queue.append(PendingMessage(
+            message_id=1, chat_id=123, update_id=100,
+            message={"id": 1}, ready_at="2020-01-01T00:00:00Z"  # Past
+        ))
+
+        ready = queue.read_ready()
+        assert len(ready) == 1
+        assert ready[0].message_id == 1
+
+    def test_read_ready_excludes_future_messages(self, tmp_path):
+        """Messages with ready_at in the future should not be returned."""
+        queue = PendingQueue(state_dir=str(tmp_path))
+
+        queue.append(PendingMessage(
+            message_id=1, chat_id=123, update_id=100,
+            message={"id": 1}, ready_at="2099-01-01T00:00:00Z"
+        ))
+
+        ready = queue.read_ready()
+        assert len(ready) == 0

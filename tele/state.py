@@ -334,6 +334,36 @@ class PendingQueue:
         self._cache = messages
         return messages.copy()
 
+    def read_ready(self) -> list[PendingMessage]:
+        """Read messages that are ready for processing.
+
+        A message is ready if:
+        - ready_at is None (new message, ready immediately)
+        - ready_at <= now (retry backoff has passed)
+
+        Returns:
+            List of ready PendingMessage objects
+        """
+        messages = self.read_all()
+        now = datetime.now(timezone.utc)
+
+        ready = []
+        for msg in messages:
+            if msg.ready_at is None:
+                ready.append(msg)
+            else:
+                try:
+                    ready_time = datetime.fromisoformat(
+                        msg.ready_at.replace('Z', '+00:00')
+                    )
+                    if ready_time <= now:
+                        ready.append(msg)
+                except (ValueError, TypeError):
+                    # Invalid timestamp, treat as ready
+                    ready.append(msg)
+
+        return ready
+
     def remove(self, message_ids: list[int]) -> bool:
         """Remove messages by message_id only (DEPRECATED - use remove_by_chat).
 
