@@ -95,3 +95,29 @@ class BatchPicker:
             return 0.0
 
         return (cool_time - now).total_seconds()
+
+    async def pick_batch_ready(
+        self,
+        queue,  # PendingQueue
+    ) -> List[PendingMessage]:
+        """Pick a batch of ready messages, waiting for debounce.
+
+        This is the main entry point for the batch picking loop.
+
+        Args:
+            queue: PendingQueue to read from
+
+        Returns:
+            A batch of messages ready for processing
+        """
+        while True:
+            now = datetime.now(timezone.utc)
+            ready_messages = queue.read_ready()
+
+            wait_time = self.calculate_wait_time(ready_messages, now)
+
+            if wait_time <= 0:
+                return self.pick_batch(ready_messages)
+
+            # Wait and try again
+            await asyncio.sleep(min(wait_time, self.check_interval))
