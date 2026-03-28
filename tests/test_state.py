@@ -241,3 +241,31 @@ class TestPendingQueue:
 
         result = queue.schedule_retry(999, 999, backoff_seconds=5.0)
         assert result is False
+
+    def test_backward_compatibility_missing_optional_fields(self, tmp_path):
+        """Messages without ready_at or created_at should work."""
+        queue = PendingQueue(state_dir=str(tmp_path))
+
+        # Write a message without the new fields (simulating old format)
+        old_message = {
+            "message_id": 1,
+            "chat_id": 123,
+            "update_id": 100,
+            "message": {"id": 1, "text": "test"},
+            "retry_count": 0,
+            "last_attempt": None
+        }
+        queue_path = tmp_path / "bot_pending.jsonl"
+        with open(queue_path, 'w') as f:
+            f.write(json.dumps(old_message) + '\n')
+
+        # Should be able to read it
+        messages = queue.read_all()
+        assert len(messages) == 1
+        assert messages[0].message_id == 1
+        assert messages[0].ready_at is None  # Default
+        assert messages[0].created_at is None  # Default
+
+        # Should be returned as ready (ready_at is None)
+        ready = queue.read_ready()
+        assert len(ready) == 1
