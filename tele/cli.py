@@ -317,8 +317,9 @@ async def run_bot_mode(
 
     batcher = MessageBatcher(page_size=page_size, interval=interval)
 
-    # Track scheduled retries
-    scheduled_retries: dict[int, asyncio.Task] = {}
+    # Track scheduled retries by (message_id, chat_id) tuple to prevent cross-chat collision
+    # Telegram message_ids are per-chat sequences; Chat A's msg 100 ≠ Chat B's msg 100
+    scheduled_retries: dict[tuple[int, int], asyncio.Task] = {}
 
     async def schedule_retry(pmsg: PendingMessage) -> None:
         """Schedule a retry with exponential backoff."""
@@ -403,6 +404,17 @@ async def run_bot_mode(
                 error_ids.append(msg_key)
 
             # Add reaction via interaction queue (with persistence and retry)
+            # CRITICAL: Remove any pending received_mark for this message first!
+            # Telegram setMessageReaction REPLACES all reactions. If received_mark
+            # is still pending when result_mark succeeds, received_mark could later
+            # overwrite the final result emoji.
+            interaction_pending.remove_matching(
+                lambda d: (
+                    d.get('id') == msg_id and
+                    d.get('chat_id') == result_chat_id and
+                    d.get('interaction_type') == 'received_mark'
+                )
+            )
             task = create_result_mark_task(msg_id, result_chat_id, emoji)
             await interaction_queue.enqueue(task)
 
@@ -448,11 +460,12 @@ async def run_bot_mode(
                         retry_count=item.get('retry_count', 0),
                         last_attempt=item.get('last_attempt'),
                     )
-                    # Cancel any existing retry task
-                    if item['message_id'] in scheduled_retries:
-                        scheduled_retries[item['message_id']].cancel()
-                    # Schedule new retry
-                    scheduled_retries[item['message_id']] = asyncio.create_task(schedule_retry(pmsg))
+                    # Cancel any existing retry task (use tuple key for cross-chat safety)
+                    retry_key = (item['message_id'], item['chat_id'])
+                    if retry_key in scheduled_retries:
+                        scheduled_retries[retry_key].cancel()
+                    # Schedule new retry (use tuple key for cross-chat safety)
+                    scheduled_retries[retry_key] = asyncio.create_task(schedule_retry(pmsg))
 
         # Update offset based on max update_id from batch
         if batch_items:

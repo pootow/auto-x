@@ -341,6 +341,53 @@ class PersistentQueue(Generic[T]):
             logger.error("Failed to update by (id, chat_id) in %s: %s", self.path, e)
             return False
 
+    def remove_matching(self, predicate: Callable[[dict], bool]) -> int:
+        """Remove items matching a predicate function.
+
+        This is useful for removing items based on multiple fields (e.g.,
+        remove received_mark for a specific message when result_mark is queued).
+
+        Args:
+            predicate: Function that takes a dict and returns True to remove the item
+
+        Returns:
+            Number of items removed (0 if none or on error)
+        """
+        if not self.path.exists():
+            return 0
+
+        try:
+            removed_count = 0
+            remaining = []
+            with open(self.path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            if predicate(data):
+                                removed_count += 1
+                            else:
+                                remaining.append(line)
+                        except json.JSONDecodeError:
+                            continue
+
+            if removed_count > 0:
+                # Atomic write
+                temp_path = self.path.with_suffix('.tmp')
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    for line in remaining:
+                        f.write(line + '\n')
+                temp_path.replace(self.path)
+
+                # Invalidate cache
+                self._cache = None
+
+            return removed_count
+        except Exception as e:
+            logger.error("Failed to remove matching items from %s: %s", self.path, e)
+            return 0
+
     def clear(self) -> bool:
         """Clear the queue.
 
