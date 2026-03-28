@@ -255,6 +255,7 @@ class PendingMessage:
     message: dict
     retry_count: int = 0
     last_attempt: Optional[str] = None
+    ready_at: Optional[str] = None  # ISO timestamp, None = ready immediately
 
 
 class PendingQueue:

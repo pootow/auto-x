@@ -7,7 +7,32 @@ from pathlib import Path
 
 import pytest
 
-from tele.state import StateManager, ChatState
+from tele.state import StateManager, ChatState, PendingMessage
+
+
+class TestPendingMessage:
+    """Test cases for PendingMessage dataclass."""
+
+    def test_pending_message_ready_at_default(self):
+        """PendingMessage should have ready_at default to None."""
+        msg = PendingMessage(
+            message_id=1,
+            chat_id=123,
+            update_id=100,
+            message={"id": 1},
+        )
+        assert msg.ready_at is None
+
+    def test_pending_message_ready_at_can_be_set(self):
+        """PendingMessage should accept ready_at timestamp."""
+        msg = PendingMessage(
+            message_id=1,
+            chat_id=123,
+            update_id=100,
+            message={"id": 1},
+            ready_at="2024-01-15T10:05:00Z",
+        )
+        assert msg.ready_at == "2024-01-15T10:05:00Z"
 
 
 class TestChatState:
