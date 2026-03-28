@@ -49,3 +49,49 @@ class BatchPicker:
             Up to page_size messages to process
         """
         return ready_messages[:self.page_size]
+
+    def _parse_timestamp(self, ts: Optional[str]) -> Optional[datetime]:
+        """Parse ISO timestamp string to datetime."""
+        if ts is None:
+            return None
+        try:
+            return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+        except (ValueError, TypeError):
+            return None
+
+    def calculate_wait_time(
+        self,
+        ready_messages: List[PendingMessage],
+        now: datetime,
+    ) -> float:
+        """Calculate how long to wait before taking a batch.
+
+        Wait until the newest message has "cooled":
+        created_at + debounce_interval <= now
+
+        Returns:
+            0.0 if batch is ready to take
+            Positive float for seconds to wait
+        """
+        if not ready_messages:
+            return self.check_interval
+
+        # Find the newest message's created_at
+        newest_time = None
+        for msg in ready_messages:
+            created = self._parse_timestamp(msg.created_at)
+            if created is not None:
+                if newest_time is None or created > newest_time:
+                    newest_time = created
+
+        if newest_time is None:
+            # No created_at info, assume ready
+            return 0.0
+
+        # Calculate when the newest message will be cool
+        cool_time = newest_time + timedelta(seconds=self.debounce_interval)
+
+        if cool_time <= now:
+            return 0.0
+
+        return (cool_time - now).total_seconds()
