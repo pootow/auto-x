@@ -15,7 +15,7 @@ from .filter import create_filter, MessageFilter
 from .state import StateManager, BotStateManager
 from .output import format_message, parse_message_id
 from .bot_client import BotClient
-from .batcher import MessageBatcher
+from .batch_picker import BatchPicker
 from .executor import run_exec_command
 from .log import setup_logging, get_logger, get_log_level_name, DATAFLOW
 
@@ -315,11 +315,10 @@ async def run_bot_mode(
     if pending_interactions:
         logger.info("Replaying %s pending interactions from previous session", len(pending_interactions))
 
-    batcher = MessageBatcher(page_size=page_size, interval=interval)
-
-    # Track scheduled retries by (message_id, chat_id) tuple to prevent cross-chat collision
-    # Telegram message_ids are per-chat sequences; Chat A's msg 100 ≠ Chat B's msg 100
-    scheduled_retries: dict[tuple[int, int], asyncio.Task] = {}
+    batch_picker = BatchPicker(
+        page_size=page_size,
+        debounce_interval=interval,
+    )
 
     async def schedule_retry(pmsg: PendingMessage) -> None:
         """Schedule a retry with exponential backoff."""
@@ -343,22 +342,12 @@ async def run_bot_mode(
         delay = RETRY_DELAYS[retry_count] if retry_count < len(RETRY_DELAYS) else RETRY_DELAYS[-1]
         logger.info("Scheduling retry %s for message %s in %ss", retry_count + 1, pmsg.message_id, delay)
 
-        await asyncio.sleep(delay)
-
-        # Update retry count and last_attempt
-        pmsg.retry_count = retry_count + 1
-        pmsg.last_attempt = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-        pending_queue.update(pmsg)
-
-        # Add back to batcher
-        await batcher.add({
-            'message_id': pmsg.message_id,
-            'chat_id': pmsg.chat_id,
-            'update_id': pmsg.update_id,
-            'message': pmsg.message,
-            'retry_count': pmsg.retry_count,
-            'last_attempt': pmsg.last_attempt,
-        })
+        # Use new schedule_retry method - sets ready_at for future processing
+        pending_queue.schedule_retry(
+            pmsg.message_id,
+            pmsg.chat_id,
+            backoff_seconds=delay
+        )
 
     async def process_batch(batch_items: List[dict]) -> None:
         """Process a batch of messages through exec command.
@@ -460,12 +449,7 @@ async def run_bot_mode(
                         retry_count=item.get('retry_count', 0),
                         last_attempt=item.get('last_attempt'),
                     )
-                    # Cancel any existing retry task (use tuple key for cross-chat safety)
-                    retry_key = (item['message_id'], item['chat_id'])
-                    if retry_key in scheduled_retries:
-                        scheduled_retries[retry_key].cancel()
-                    # Schedule new retry (use tuple key for cross-chat safety)
-                    scheduled_retries[retry_key] = asyncio.create_task(schedule_retry(pmsg))
+                    await schedule_retry(pmsg)
 
         # Update offset based on max update_id from batch
         if batch_items:
@@ -473,25 +457,39 @@ async def run_bot_mode(
             state_mgr.save(max_update_id)
             logger.debug("Updated offset to %s", max_update_id)
 
-    batcher.on_batch = process_batch
+    async def batch_loop():
+        """Background task that picks batches and processes them."""
+        while True:
+            try:
+                batch = await batch_picker.pick_batch_ready(pending_queue)
+                if not batch:
+                    continue
+                # Convert to batch_items format expected by process_batch
+                batch_items = [{
+                    'message_id': msg.message_id,
+                    'chat_id': msg.chat_id,
+                    'update_id': msg.update_id,
+                    'message': msg.message,
+                    'retry_count': msg.retry_count,
+                    'last_attempt': msg.last_attempt,
+                } for msg in batch]
+                await process_batch(batch_items)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Error in batch loop: %s", e, exc_info=True)
+                await asyncio.sleep(1.0)  # Backoff on error
+
+    batch_task = asyncio.create_task(batch_loop())
 
     # Load last offset
     state = state_mgr.load()
     offset = state.get('last_update_id', 0)
 
-    # Load and replay pending messages on startup
-    pending_messages = pending_queue.read_all()
+    # Check for pending messages from previous session (will be picked up by batch_loop)
+    pending_messages = pending_queue.read_ready()
     if pending_messages:
         logger.info("Replaying %s pending messages from previous session", len(pending_messages))
-        for pmsg in pending_messages:
-            await batcher.add({
-                'message_id': pmsg.message_id,
-                'chat_id': pmsg.chat_id,
-                'update_id': pmsg.update_id,
-                'message': pmsg.message,
-                'retry_count': pmsg.retry_count,
-                'last_attempt': pmsg.last_attempt,
-            })
 
     # Polling backoff for error recovery
     poll_backoff = 0.0
@@ -539,18 +537,8 @@ async def run_bot_mode(
                         last_attempt=None,
                     )
 
-                    # Append to pending file BEFORE adding to batcher
+                    # Append to pending file - will be picked up by batch_loop
                     pending_queue.append(pmsg)
-
-                    # Add to batcher with metadata
-                    await batcher.add({
-                        'message_id': pmsg.message_id,
-                        'chat_id': pmsg.chat_id,
-                        'update_id': pmsg.update_id,
-                        'message': pmsg.message,
-                        'retry_count': pmsg.retry_count,
-                        'last_attempt': pmsg.last_attempt,
-                    })
                     logger.debug("Queued message %s for processing", msg_id)
 
                     # Add received reaction via interaction queue (with persistence and retry)
@@ -572,13 +560,15 @@ async def run_bot_mode(
 
     except KeyboardInterrupt:
         logger.info("Shutting down...")
-        await batcher.flush_remaining()
     finally:
+        # Stop batch loop task
+        batch_task.cancel()
+        try:
+            await batch_task
+        except asyncio.CancelledError:
+            pass
         # Stop interaction queue gracefully
         await interaction_queue.stop()
-        # Cancel any pending retry tasks
-        for task in scheduled_retries.values():
-            task.cancel()
         await client.close()
 
 
