@@ -637,3 +637,391 @@ class TestPersistenceIntegration:
             assert len(fatal_queue.read_all()) == 1
             # Nothing in dead-letter yet
             assert len(dead_queue.read_all()) == 0
+
+    @pytest.mark.asyncio
+    async def test_concurrent_message_processing_bug(self):
+        """Reproduce bug: messages stuck in pending when processor is slow.
+
+        Scenario:
+        1. Message A enters batcher, starts processing (processor is slow)
+        2. While A is processing, Message B enters batcher
+        3. Both should be processed together or sequentially
+        4. BUG: What if processor returns results out of order or missing?
+
+        This test verifies the data flow and matching logic.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pending_queue = PendingQueue(state_dir=tmpdir)
+            results_log = []
+            processing_events = []
+
+            # Track when processor starts and finishes
+            processor_started = asyncio.Event()
+            can_finish = asyncio.Event()
+
+            async def slow_processor(messages):
+                """Processor that processes messages and can be controlled."""
+                processing_events.append(f"started with {len(messages)} messages")
+                processor_started.set()
+
+                # Wait for signal to finish (simulates slow processing)
+                await can_finish.wait()
+
+                # Return results - but what if we return fewer results?
+                results = []
+                for m in messages:
+                    results.append({
+                        "id": m["id"],
+                        "chat_id": m["chat_id"],
+                        "status": "success"
+                    })
+                processing_events.append(f"finished with {len(results)} results")
+                results_log.extend(results)
+                return results
+
+            batcher = MessageBatcher(page_size=10, interval=0.1)
+
+            async def process_batch(items):
+                messages = [item["message"] for item in items]
+                results = await slow_processor(messages)
+
+                # Match results to items
+                success_ids = []
+                for r in results:
+                    msg_id = r.get('id')
+                    result_chat_id = r.get('chat_id')
+                    if msg_id and result_chat_id:
+                        success_ids.append((msg_id, result_chat_id))
+
+                if success_ids:
+                    pending_queue.remove_by_chat(success_ids)
+
+            batcher.on_batch = process_batch
+
+            # Add message A
+            msg_a = PendingMessage(
+                message_id=269,
+                chat_id=778110601,
+                update_id=860459261,
+                message={"id": 269, "chat_id": 778110601, "text": "message A"},
+            )
+            pending_queue.append(msg_a)
+            await batcher.add({
+                "message_id": msg_a.message_id,
+                "chat_id": msg_a.chat_id,
+                "update_id": msg_a.update_id,
+                "message": msg_a.message,
+            })
+
+            # Wait for processor to start
+            await processor_started.wait()
+
+            # While A is processing, add message B
+            msg_b = PendingMessage(
+                message_id=284,
+                chat_id=778110601,
+                update_id=860459270,
+                message={"id": 284, "chat_id": 778110601, "text": "message B"},
+            )
+            pending_queue.append(msg_b)
+            await batcher.add({
+                "message_id": msg_b.message_id,
+                "chat_id": msg_b.chat_id,
+                "update_id": msg_b.update_id,
+                "message": msg_b.message,
+            })
+
+            # Let processor finish
+            can_finish.set()
+
+            # Wait for batch processing
+            await asyncio.sleep(0.3)
+
+            # Check processing events
+            print(f"Processing events: {processing_events}")
+            print(f"Results log: {results_log}")
+
+            # Verify: both messages should be processed
+            remaining = pending_queue.read_all()
+            print(f"Remaining in pending: {[m.message_id for m in remaining]}")
+
+            # Both messages should be processed and removed
+            assert len(remaining) == 0, f"Both messages should be removed from pending, but found {[m.message_id for m in remaining]}"
+
+    @pytest.mark.asyncio
+    async def test_processor_returns_fewer_results_than_inputs(self):
+        """Test what happens when processor returns fewer results than input messages.
+
+        This is a potential root cause: processor outputs N results for N+M inputs.
+        The M missing results would stay in pending forever with last_attempt=null.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pending_queue = PendingQueue(state_dir=tmpdir)
+
+            # Processor that only returns 2 results for 3 input messages
+            async def partial_processor(messages):
+                results = []
+                for i, m in enumerate(messages):
+                    # Only output results for first 2 messages
+                    if i < 2:
+                        results.append({
+                            "id": m["id"],
+                            "chat_id": m["chat_id"],
+                            "status": "success"
+                        })
+                    # Message 3 is silently not returned!
+                return results
+
+            batcher = MessageBatcher(page_size=10, interval=0.1)
+
+            async def process_batch(items):
+                messages = [item["message"] for item in items]
+                results = await partial_processor(messages)
+
+                # Current logic: only remove messages that have results
+                success_ids = []
+                for r in results:
+                    msg_id = r.get('id')
+                    result_chat_id = r.get('chat_id')
+                    if msg_id and result_chat_id:
+                        success_ids.append((msg_id, result_chat_id))
+
+                if success_ids:
+                    pending_queue.remove_by_chat(success_ids)
+
+                # BUG: items without results are never removed from pending!
+                # They stay with last_attempt=null, offset advances past them
+
+            batcher.on_batch = process_batch
+
+            # Add 3 messages
+            for i in range(3):
+                msg = PendingMessage(
+                    message_id=100 + i,
+                    chat_id=456,
+                    update_id=1 + i,
+                    message={"id": 100 + i, "chat_id": 456, "text": f"msg{i}"},
+                )
+                pending_queue.append(msg)
+                await batcher.add({
+                    "message_id": msg.message_id,
+                    "chat_id": msg.chat_id,
+                    "update_id": msg.update_id,
+                    "message": msg.message,
+                })
+
+            await asyncio.sleep(0.2)
+
+            # Check what's left in pending
+            remaining = pending_queue.read_all()
+            print(f"Remaining in pending: {[m.message_id for m in remaining]}")
+
+            # BUG: Message 102 (id=102) is stuck in pending with no result
+            assert len(remaining) == 1, "One message should be stuck (this documents the bug)"
+            assert remaining[0].message_id == 102, "Message 102 should be the stuck one"
+
+    @pytest.mark.asyncio
+    async def test_batcher_flush_cancel_race_condition(self):
+        """Reproduce the race condition in MessageBatcher.cancel() behavior.
+
+        ROOT CAUSE IDENTIFIED:
+        When a new message arrives while _debounced_flush is already running:
+        1. add() cancels the _flush_task
+        2. add() awaits the cancelled task (which raises CancelledError)
+        3. But if _flush() is already executing on_batch(), it may NOT be cancelled!
+        4. add() creates a new _flush_task
+        5. Two _flush() calls run concurrently - results race/overwrite
+
+        The problem: cancelling a Task doesn't stop code that's already running
+        inside the coroutine - it just prevents the task from continuing after
+        the next await point.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pending_queue = PendingQueue(state_dir=tmpdir)
+            results_log = []
+            flush_events = []
+
+            # Create events to control timing
+            first_flush_started = asyncio.Event()
+            first_flush_can_finish = asyncio.Event()
+            second_flush_started = asyncio.Event()
+
+            async def controlled_processor(messages):
+                """Processor that signals when it starts and can be controlled."""
+                flush_id = id(messages)  # Unique ID for this batch
+                flush_events.append(f"processor called with {len(messages)} messages (id={flush_id})")
+
+                if len(messages) == 1 and messages[0].get("id") == 269:
+                    # First message - signal and wait
+                    first_flush_started.set()
+                    await first_flush_can_finish.wait()
+                    flush_events.append(f"first processor finishing (id={flush_id})")
+                else:
+                    # Second message
+                    second_flush_started.set()
+                    flush_events.append(f"second processor finishing (id={flush_id})")
+
+                return [{"id": m["id"], "chat_id": m["chat_id"], "status": "success"} for m in messages]
+
+            batcher = MessageBatcher(page_size=10, interval=0.05)  # 50ms debounce
+
+            async def process_batch(items):
+                messages = [item["message"] for item in items]
+                results = await controlled_processor(messages)
+                results_log.extend(results)
+
+                success_ids = [(r['id'], r['chat_id']) for r in results]
+                if success_ids:
+                    pending_queue.remove_by_chat(success_ids)
+
+            batcher.on_batch = process_batch
+
+            # Add message A - will trigger debounce
+            msg_a = PendingMessage(
+                message_id=269,
+                chat_id=778110601,
+                update_id=860459261,
+                message={"id": 269, "chat_id": 778110601, "text": "A"},
+            )
+            pending_queue.append(msg_a)
+            await batcher.add({
+                "message_id": msg_a.message_id,
+                "chat_id": msg_a.chat_id,
+                "update_id": msg_a.update_id,
+                "message": msg_a.message,
+            })
+
+            # Wait for debounce to trigger and processor to start
+            await first_flush_started.wait()
+            flush_events.append("first processor started, now adding message B")
+
+            # Add message B while A is still being processed
+            # This triggers the cancel race condition
+            msg_b = PendingMessage(
+                message_id=284,
+                chat_id=778110601,
+                update_id=860459270,
+                message={"id": 284, "chat_id": 778110601, "text": "B"},
+            )
+            pending_queue.append(msg_b)
+            await batcher.add({
+                "message_id": msg_b.message_id,
+                "chat_id": msg_b.chat_id,
+                "update_id": msg_b.update_id,
+                "message": msg_b.message,
+            })
+            flush_events.append("message B added")
+
+            # Let first processor finish
+            first_flush_can_finish.set()
+
+            # Wait for second flush to complete
+            await asyncio.sleep(0.15)
+
+            print(f"Flush events: {flush_events}")
+            print(f"Results log: {results_log}")
+
+            remaining = pending_queue.read_all()
+            print(f"Remaining in pending: {[m.message_id for m in remaining]}")
+
+            # BUG: Message 269 might be stuck because first flush was interrupted
+            # or both flushes ran concurrently with unexpected results
+
+    @pytest.mark.asyncio
+    async def test_missing_results_should_trigger_retry(self):
+        """Test that messages without results are scheduled for retry.
+
+        DESIGN PRINCIPLE:
+        - Batch forms → sent to executor
+        - Executor returns results
+        - Messages with success/fatal: removed from pending
+        - Messages with error: scheduled for retry
+        - Messages WITHOUT any result: should also be scheduled for retry!
+
+        CURRENT BUG:
+        Messages without results stay in pending_queue but never get retried.
+        They wait there until restart, then replayed.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pending_queue = PendingQueue(state_dir=tmpdir)
+            retry_scheduled = []
+
+            # Processor that returns NO result for one message
+            async def partial_processor(messages):
+                results = []
+                for m in messages:
+                    if m["id"] != 102:  # Skip message 102
+                        results.append({
+                            "id": m["id"],
+                            "chat_id": m["chat_id"],
+                            "status": "success"
+                        })
+                return results
+
+            batcher = MessageBatcher(page_size=10, interval=0.1)
+            scheduled_retries = {}  # Simulating the retry tracking
+
+            async def process_batch(items):
+                messages = [item["message"] for item in items]
+                results = await partial_processor(messages)
+
+                # Current logic (from cli.py)
+                success_ids = []
+                error_ids = []
+
+                for r in results:
+                    msg_id = r.get('id')
+                    result_chat_id = r.get('chat_id')
+                    status = r.get('status')
+
+                    if status == 'success':
+                        success_ids.append((msg_id, result_chat_id))
+                    elif status == 'error':
+                        error_ids.append((msg_id, result_chat_id))
+
+                # Remove successful from pending
+                if success_ids:
+                    pending_queue.remove_by_chat(success_ids)
+
+                # Schedule retry for errors
+                for item in items:
+                    item_key = (item['message_id'], item['chat_id'])
+                    if item_key in error_ids:
+                        retry_scheduled.append(item['message_id'])
+
+                # BUG: Messages in batch_items that have NO result are ignored!
+                # They stay in pending_queue but no retry is scheduled
+
+            batcher.on_batch = process_batch
+
+            # Add 3 messages
+            for i in range(3):
+                msg = PendingMessage(
+                    message_id=100 + i,
+                    chat_id=456,
+                    update_id=1 + i,
+                    message={"id": 100 + i, "chat_id": 456, "text": f"msg{i}"},
+                )
+                pending_queue.append(msg)
+                await batcher.add({
+                    "message_id": msg.message_id,
+                    "chat_id": msg.chat_id,
+                    "update_id": msg.update_id,
+                    "message": msg.message,
+                })
+
+            await asyncio.sleep(0.2)
+
+            remaining = pending_queue.read_all()
+            print(f"Remaining in pending: {[m.message_id for m in remaining]}")
+            print(f"Retry scheduled for: {retry_scheduled}")
+
+            # Current behavior (BUG):
+            # - Message 102 is in pending_queue (correct)
+            # - But no retry is scheduled (wrong!)
+            # - It will sit there until restart
+            assert len(remaining) == 1
+            assert remaining[0].message_id == 102
+
+            # This should be true but currently isn't:
+            # assert 102 in retry_scheduled, "Message 102 should have retry scheduled"

@@ -45,6 +45,9 @@ class MessageBatcher:
     async def _debounced_flush(self) -> None:
         """Wait for interval, then flush if still pending."""
         await asyncio.sleep(self.interval)
+        # Clear _flush_task BEFORE starting actual flush
+        # This prevents add() from canceling a flush that's already in progress
+        self._flush_task = None
         if self._messages:
             await self._flush()
 
