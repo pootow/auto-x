@@ -64,6 +64,17 @@ class InteractionTask(QueueItem):
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'))
     last_attempt: Optional[str] = None
 
+    def unique_key(self) -> tuple:
+        """Return a tuple that uniquely identifies this interaction task.
+
+        Includes interaction_type to distinguish between received_mark,
+        result_mark, and reply tasks for the same message.
+
+        Without this, removing a successful received_mark would also
+        remove pending result_mark and reply tasks (race condition bug).
+        """
+        return (self.id, self.chat_id, self.interaction_type)
+
 
 # Dead-letter variants (for manual recovery)
 

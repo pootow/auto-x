@@ -348,3 +348,169 @@ class TestCrossChatCollisionInCLI:
         assert len(items) == 1
         assert items[0].chat_id == 222
         assert items[0].data['emoji'] == '✅'
+
+
+class TestInteractionTypeRaceConditionBug:
+    """Tests to reproduce and verify the race condition bug.
+
+    BUG SCENARIO:
+    When multiple interaction tasks have the same (id, chat_id) but different
+    interaction_type, _on_success removes ALL of them instead of just the one
+    that succeeded.
+
+    Example:
+    1. received_mark (👀) is enqueued for message 100 in chat 123
+    2. Processing takes 5 minutes
+    3. During processing, result_mark (👍) and reply are enqueued
+    4. received_mark HTTP call succeeds
+    5. _on_success calls remove_by_id_and_chat([(100, 123)])
+    6. BUG: This removes result_mark and reply too!
+    7. Result: 👀 never gets replaced by 👍
+
+    This test should FAIL with current code, proving the bug exists.
+    """
+
+    @pytest.mark.asyncio
+    async def test_on_success_should_not_remove_other_interaction_types(self, tmp_path):
+        """FAILING TEST: _on_success should only remove the specific item that succeeded.
+
+        This test reproduces the bug where removing one interaction type
+        accidentally removes other types with the same (id, chat_id).
+
+        With buggy code: This test FAILS (result_mark and reply are removed)
+        With fixed code: This test PASSES (only received_mark is removed)
+        """
+        from tele.async_queue import AsyncRetryQueue
+
+        pending_path = tmp_path / "interaction_pending.jsonl"
+        dead_path = tmp_path / "interaction_dead.jsonl"
+
+        pending_queue = PersistentQueue[InteractionTask](
+            path=pending_path, item_class=InteractionTask
+        )
+        dead_queue = PersistentQueue[DeadInteractionTask](
+            path=dead_path, item_class=DeadInteractionTask
+        )
+
+        # Setup: Three interaction types with SAME (id, chat_id) but different types
+        received_mark = InteractionTask(
+            id=100,
+            chat_id=123,
+            interaction_type='received_mark',
+            data={'emoji': '👀'},
+        )
+        result_mark = InteractionTask(
+            id=100,
+            chat_id=123,
+            interaction_type='result_mark',
+            data={'emoji': '👍'},
+        )
+        reply = InteractionTask(
+            id=100,
+            chat_id=123,
+            interaction_type='reply_text',
+            data={'text': 'Hello'},
+        )
+
+        # All three are in the queue (simulating race condition timing)
+        pending_queue.append(received_mark)
+        pending_queue.append(result_mark)
+        pending_queue.append(reply)
+
+        # Verify setup: 3 items in queue
+        items_before = pending_queue.read_all()
+        assert len(items_before) == 3, "Setup failed: should have 3 items"
+
+        # Create retry queue
+        process_func = AsyncMock(return_value=True)
+        retry_queue = AsyncRetryQueue(
+            pending_queue=pending_queue,
+            dead_letter_queue=dead_queue,
+            process_func=process_func,
+            check_interval=0.1,
+        )
+
+        # ACT: _on_success for received_mark
+        # BUG: This removes ALL items with (100, 123), not just received_mark
+        retry_queue._on_success(received_mark)
+
+        # ASSERT: Only received_mark should be removed
+        # result_mark and reply should STILL be in queue
+        items_after = pending_queue.read_all()
+
+        # THIS ASSERTION FAILS WITH BUGGY CODE
+        # Because remove_by_id_and_chat removes ALL items with (100, 123)
+        assert len(items_after) == 2, (
+            f"BUG: _on_success removed {3 - len(items_after)} extra items! "
+            f"Should only remove received_mark, but result_mark and/or reply were also removed."
+        )
+
+        # Verify the remaining items are result_mark and reply
+        remaining_types = {item.interaction_type for item in items_after}
+        assert 'received_mark' not in remaining_types, "received_mark should be removed"
+        assert 'result_mark' in remaining_types, "BUG: result_mark was incorrectly removed"
+        assert 'reply_text' in remaining_types, "BUG: reply was incorrectly removed"
+
+    @pytest.mark.asyncio
+    async def test_on_failure_should_not_update_other_interaction_types(self, tmp_path):
+        """FAILING TEST: _on_failure should only update the specific item that failed.
+
+        Similar bug: update_by_id_and_chat updates ALL items with same (id, chat_id).
+        """
+        from tele.async_queue import AsyncRetryQueue
+
+        pending_path = tmp_path / "interaction_pending.jsonl"
+        dead_path = tmp_path / "interaction_dead.jsonl"
+
+        pending_queue = PersistentQueue[InteractionTask](
+            path=pending_path, item_class=InteractionTask
+        )
+        dead_queue = PersistentQueue[DeadInteractionTask](
+            path=dead_path, item_class=DeadInteractionTask
+        )
+
+        # Two interaction types with SAME (id, chat_id)
+        received_mark = InteractionTask(
+            id=100,
+            chat_id=123,
+            interaction_type='received_mark',
+            data={'emoji': '👀'},
+            retry_count=0,  # Initial: no retries
+        )
+        result_mark = InteractionTask(
+            id=100,
+            chat_id=123,
+            interaction_type='result_mark',
+            data={'emoji': '👍'},
+            retry_count=0,  # Initial: no retries
+        )
+
+        pending_queue.append(received_mark)
+        pending_queue.append(result_mark)
+
+        # Create retry queue
+        process_func = AsyncMock(return_value=False)
+        retry_queue = AsyncRetryQueue(
+            pending_queue=pending_queue,
+            dead_letter_queue=dead_queue,
+            process_func=process_func,
+            check_interval=0.1,
+            max_retries=5,
+        )
+
+        # ACT: _on_failure for result_mark only
+        retry_queue._on_failure(result_mark)
+
+        # ASSERT: Only result_mark should have updated retry_count
+        items = pending_queue.read_all()
+
+        for item in items:
+            if item.interaction_type == 'received_mark':
+                # BUG: With buggy code, this fails because update_by_id_and_chat
+                # updated BOTH items
+                assert item.retry_count == 0, (
+                    f"BUG: received_mark retry_count was incorrectly updated to {item.retry_count}. "
+                    f"Only result_mark should have been updated."
+                )
+            elif item.interaction_type == 'result_mark':
+                assert item.retry_count == 1, "result_mark should have retry_count=1"

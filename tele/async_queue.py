@@ -34,6 +34,23 @@ class QueueItem:
         """Convert to dictionary for serialization."""
         return asdict(self)
 
+    def unique_key(self) -> tuple:
+        """Return a tuple that uniquely identifies this item.
+
+        Used for removal from queue to prevent accidentally removing
+        related items with the same id/chat_id but different types.
+
+        Default implementation uses (id, chat_id) if chat_id exists,
+        otherwise just (id).
+
+        Subclasses can override to include additional fields
+        (e.g., InteractionTask includes interaction_type).
+        """
+        # Check if chat_id attribute exists (subclasses may have it)
+        if hasattr(self, 'chat_id') and getattr(self, 'chat_id') is not None:
+            return (self.id, getattr(self, 'chat_id'))
+        return (self.id,)
+
 
 class PersistentQueue(Generic[T]):
     """Generic persistent queue with JSON Lines storage.
@@ -230,6 +247,68 @@ class PersistentQueue(Generic[T]):
             logger.error("Failed to remove by (id, chat_id) from %s: %s", self.path, e)
             return False
 
+    def remove_by_unique_key(self, keys: List[tuple]) -> bool:
+        """Remove items by their unique_key tuples.
+
+        This method uses the same unique_key() concept from QueueItem to
+        remove only specific items, preventing accidental removal of
+        related items with the same (id, chat_id) but different types
+        (e.g., received_mark vs result_mark vs reply).
+
+        Args:
+            keys: List of unique_key tuples to remove.
+                  Format depends on item class:
+                  - (id,) for basic QueueItem without chat_id
+                  - (id, chat_id) for items with chat_id
+                  - (id, chat_id, interaction_type) for InteractionTask
+
+        Returns:
+            True on success, False on failure (never raises)
+        """
+        if not keys:
+            return True
+
+        if not self.path.exists():
+            return True
+
+        try:
+            remaining = []
+            removed_count = 0
+            with open(self.path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            # Build unique_key from data using same logic as QueueItem.unique_key()
+                            data_key = (data.get('id'),)
+                            if 'chat_id' in data and data.get('chat_id') is not None:
+                                data_key = (data.get('id'), data.get('chat_id'))
+                            if 'interaction_type' in data:
+                                data_key = (data.get('id'), data.get('chat_id'), data.get('interaction_type'))
+
+                            if data_key in keys:
+                                removed_count += 1
+                            else:
+                                remaining.append(line)
+                        except json.JSONDecodeError:
+                            continue
+
+            if removed_count > 0:
+                # Atomic write
+                temp_path = self.path.with_suffix('.tmp')
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    for line in remaining:
+                        f.write(line + '\n')
+                temp_path.replace(self.path)
+                # Invalidate cache
+                self._cache = None
+
+            return True
+        except Exception as e:
+            logger.error("Failed to remove by unique_key from %s: %s", self.path, e)
+            return False
+
     def update(self, item: T) -> bool:
         """Update an item in the queue (rewrite file).
 
@@ -339,6 +418,73 @@ class PersistentQueue(Generic[T]):
             return True
         except Exception as e:
             logger.error("Failed to update by (id, chat_id) in %s: %s", self.path, e)
+            return False
+
+    def update_by_unique_key(self, item: T) -> bool:
+        """Update an item in the queue by its unique_key.
+
+        Like remove_by_unique_key, this updates only the specific item
+        matching the unique_key, preventing accidental updates to related
+        items with the same (id, chat_id) but different types.
+
+        Args:
+            item: The item to update (matched by unique_key)
+
+        Returns:
+            True on success, False on failure (never raises)
+        """
+        if not self.path.exists():
+            return False
+
+        try:
+            # Convert to dict
+            if hasattr(item, 'to_dict'):
+                new_data = item.to_dict()
+            else:
+                new_data = asdict(item) if hasattr(item, '__dataclass_fields__') else item
+
+            # Build unique_key from new_data
+            new_key = (new_data.get('id'),)
+            if 'chat_id' in new_data and new_data.get('chat_id') is not None:
+                new_key = (new_data.get('id'), new_data.get('chat_id'))
+            if 'interaction_type' in new_data:
+                new_key = (new_data.get('id'), new_data.get('chat_id'), new_data.get('interaction_type'))
+
+            # Read all, update matching one by unique_key
+            lines = []
+            with open(self.path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            # Build key for this line
+                            data_key = (data.get('id'),)
+                            if 'chat_id' in data and data.get('chat_id') is not None:
+                                data_key = (data.get('id'), data.get('chat_id'))
+                            if 'interaction_type' in data:
+                                data_key = (data.get('id'), data.get('chat_id'), data.get('interaction_type'))
+
+                            if data_key == new_key:
+                                lines.append(json.dumps(new_data))
+                            else:
+                                lines.append(line)
+                        except json.JSONDecodeError:
+                            continue
+
+            # Atomic write
+            temp_path = self.path.with_suffix('.tmp')
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                for line in lines:
+                    f.write(line + '\n')
+
+            temp_path.replace(self.path)
+
+            # Invalidate cache
+            self._cache = None
+            return True
+        except Exception as e:
+            logger.error("Failed to update by unique_key in %s: %s", self.path, e)
             return False
 
     def remove_matching(self, predicate: Callable[[dict], bool]) -> int:
@@ -611,21 +757,28 @@ class AsyncRetryQueue(Generic[T]):
             return True
 
     def _on_success(self, item: T) -> None:
-        """Handle successful processing."""
+        """Handle successful processing.
+
+        Uses unique_key() to remove only the specific item that succeeded,
+        preventing accidental removal of related items with the same
+        (id, chat_id) but different types (e.g., received_mark vs result_mark).
+        """
         item_id = getattr(item, 'id', '?')
-        item_chat_id = getattr(item, 'chat_id', None)
-        if item_chat_id is not None:
-            # Use (id, chat_id) tuple to prevent cross-chat collision
-            self.pending_queue.remove_by_id_and_chat([(item_id, item_chat_id)])
-        else:
-            self.pending_queue.remove([item_id])
+        # Use unique_key() to remove only this specific item
+        key = item.unique_key() if hasattr(item, 'unique_key') else (item_id,)
+        self.pending_queue.remove_by_unique_key([key])
         logger.debug("Item %s processed successfully, removed from queue", item_id)
 
     def _on_failure(self, item: T) -> None:
-        """Handle failed processing."""
+        """Handle failed processing.
+
+        Uses unique_key() to update/remove only the specific item that failed,
+        preventing accidental modification of related items with the same
+        (id, chat_id) but different types (e.g., received_mark vs result_mark).
+        """
         item_id = getattr(item, 'id', '?')
-        item_chat_id = getattr(item, 'chat_id', None)
         retry_count = getattr(item, 'retry_count', 0)
+        key = item.unique_key() if hasattr(item, 'unique_key') else (item_id,)
 
         if retry_count >= self.max_retries:
             # Move to dead-letter
@@ -643,11 +796,8 @@ class AsyncRetryQueue(Generic[T]):
                                item_id, self.dead_letter_queue.path)
             else:
                 logger.warning("No dead_letter_queue configured! Item %s will be lost!", item_id)
-            # Remove from pending queue using (id, chat_id) tuple to prevent cross-chat collision
-            if item_chat_id is not None:
-                remove_success = self.pending_queue.remove_by_id_and_chat([(item_id, item_chat_id)])
-            else:
-                remove_success = self.pending_queue.remove([item_id])
+            # Remove from pending queue using unique_key to remove only this specific item
+            remove_success = self.pending_queue.remove_by_unique_key([key])
             if not remove_success:
                 logger.warning("Failed to remove item %s from pending queue", item_id)
         else:
@@ -656,11 +806,8 @@ class AsyncRetryQueue(Generic[T]):
                 item.retry_count = retry_count + 1
             if hasattr(item, 'last_attempt'):
                 item.last_attempt = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-            # Use update_by_id_and_chat to prevent cross-chat collision
-            if item_chat_id is not None:
-                self.pending_queue.update_by_id_and_chat(item)
-            else:
-                self.pending_queue.update(item)
+            # Use update_by_unique_key to update only this specific item
+            self.pending_queue.update_by_unique_key(item)
             logger.info("Item %s failed, will retry (attempt %s/%s)",
                        item_id, retry_count + 1, self.max_retries)
 
