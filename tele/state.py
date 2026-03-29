@@ -698,6 +698,7 @@ class FatalError:
     exec_cmd: str
     failed_at: str
     reason: str
+    log_file: Optional[str] = None  # Path to detailed error log
 
 
 class FatalQueue:

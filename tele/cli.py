@@ -365,6 +365,7 @@ async def run_bot_mode(
         error_ids = []   # Retriable errors - List of (message_id, chat_id)
         fatal_ids = []   # Non-retriable - List of (message_id, chat_id)
         fatal_reasons = {}  # (message_id, chat_id) -> reason for fatal errors
+        fatal_results = {}  # (message_id, chat_id) -> full result object for logging
 
         # Mark messages based on status
         for result in results:
@@ -388,6 +389,7 @@ async def run_bot_mode(
                 emoji = failed_mark
                 fatal_ids.append(msg_key)
                 fatal_reasons[msg_key] = result.get('reason', 'Processor returned fatal status')
+                fatal_results[msg_key] = result  # Store full result for detailed logging
             else:  # 'error' or unknown - treat as retriable
                 emoji = failed_mark
                 error_ids.append(msg_key)
@@ -444,19 +446,52 @@ async def run_bot_mode(
 
         # Handle fatal errors - append to fatal.jsonl
         if fatal_ids:
+            # Create fatal_logs directory for detailed error logs
+            fatal_logs_dir = state_dir / "fatal_logs"
+            fatal_logs_dir.mkdir(parents=True, exist_ok=True)
+
             for item in batch_items:
                 item_key = (item['message_id'], item['chat_id'])
                 if item_key in fatal_ids:
+                    # Generate log filename: [chat_id]-[message_id]-[timestamp].log
+                    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                    log_filename = f"{item['chat_id']}-{item['message_id']}-{timestamp}-processor-output.log"
+                    log_path = fatal_logs_dir / log_filename
+
+                    # Get full result and reason
+                    result = fatal_results.get(item_key, {})
+                    reason = fatal_reasons.get(item_key, 'Processor returned fatal status')
+
+                    # Write detailed log file
+                    try:
+                        with open(log_path, 'w', encoding='utf-8') as f:
+                            f.write(f"Fatal Error Log\n")
+                            f.write(f"===============\n\n")
+                            f.write(f"Chat ID: {item['chat_id']}\n")
+                            f.write(f"Message ID: {item['message_id']}\n")
+                            f.write(f"Time: {datetime.now(timezone.utc).isoformat()}\n")
+                            f.write(f"Processor Command: {exec_cmd}\n\n")
+                            f.write(f"Reason: {reason}\n\n")
+                            f.write(f"Full Processor Result:\n")
+                            f.write(json.dumps(result, indent=2, ensure_ascii=False))
+                            f.write("\n\n")
+                            f.write(f"Original Message:\n")
+                            f.write(json.dumps(item['message'], indent=2, ensure_ascii=False))
+                            f.write("\n")
+                    except Exception as e:
+                        logger.error("Failed to write fatal log file: %s", e)
+
                     fe = FatalError(
                         message_id=item['message_id'],
                         chat_id=item['chat_id'],
                         message=item['message'],
                         exec_cmd=exec_cmd,
                         failed_at=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
-                        reason=fatal_reasons.get(item_key, 'Processor returned fatal status'),
+                        reason=f"{reason}, see {log_filename}",
+                        log_file=str(log_path),
                     )
                     fatal_queue.append(fe)
-                    logger.warning("Message %s marked as fatal, no retry value", item['message_id'])
+                    logger.warning("Message %s marked as fatal, log: %s", item['message_id'], log_filename)
 
         # Remove successful and fatal messages from pending
         to_remove = success_ids + fatal_ids
