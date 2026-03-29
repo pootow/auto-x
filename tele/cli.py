@@ -414,6 +414,34 @@ async def run_bot_mode(
                     await interaction_queue.enqueue(task)
                     logger.debug("Queued reply for message %s", msg_id)
 
+        # Find messages that had no result at all (processor didn't return them)
+        # These should be treated as retriable errors
+        result_ids = {
+            (r.get('id'), r.get('chat_id'))
+            for r in results
+            if r.get('id') and r.get('chat_id')
+        }
+        missing_ids = []
+        for item in batch_items:
+            item_key = (item['message_id'], item['chat_id'])
+            if item_key not in result_ids:
+                missing_ids.append(item_key)
+
+        if missing_ids:
+            logger.warning("%s messages had no processor result, scheduling retry", len(missing_ids))
+            for item in batch_items:
+                item_key = (item['message_id'], item['chat_id'])
+                if item_key in missing_ids:
+                    pmsg = PendingMessage(
+                        message_id=item['message_id'],
+                        chat_id=item['chat_id'],
+                        update_id=item['update_id'],
+                        message=item['message'],
+                        retry_count=item.get('retry_count', 0),
+                        last_attempt=item.get('last_attempt'),
+                    )
+                    await schedule_retry(pmsg)
+
         # Handle fatal errors - append to fatal.jsonl
         if fatal_ids:
             for item in batch_items:
