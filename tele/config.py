@@ -37,6 +37,24 @@ class TelegramConfig:
     session_name: str = "tele_tool"
     endpoint_routing: Dict[str, List[str]] = field(default_factory=dict)
 
+    def get_endpoint_for_method(self, method: str) -> str:
+        """Get the endpoint for a specific API method.
+
+        Iterates through endpoint_routing in order. If method appears
+        in multiple routing entries, the last one wins.
+
+        Args:
+            method: API method name (e.g., "sendVideo", "getUpdates")
+
+        Returns:
+            Endpoint URL for the method, or default if not routed
+        """
+        endpoint_for_method = None
+        for endpoint, methods in self.endpoint_routing.items():
+            if method in methods:
+                endpoint_for_method = endpoint
+        return endpoint_for_method if endpoint_for_method else self.bot_api_endpoint
+
 
 @dataclass
 class DefaultsConfig:

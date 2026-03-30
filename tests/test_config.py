@@ -216,3 +216,66 @@ class TestNormalizeApiEndpoint:
     def test_normalize(self, input_value, expected):
         """Test various endpoint formats are normalized correctly."""
         assert _normalize_api_endpoint(input_value) == expected
+
+
+class TestEndpointRoutingLookup:
+    """Test cases for get_endpoint_for_method."""
+
+    def test_default_endpoint_when_no_routing(self):
+        """Test returns default when no routing configured."""
+        config = TelegramConfig(
+            bot_api_endpoint="api.telegram.org",
+            endpoint_routing={}
+        )
+        result = config.get_endpoint_for_method("sendVideo")
+        assert result == "api.telegram.org"
+
+    def test_routed_method_returns_assigned_endpoint(self):
+        """Test returns assigned endpoint for routed method."""
+        config = TelegramConfig(
+            bot_api_endpoint="api.telegram.org",
+            endpoint_routing={
+                "local.server:8081": ["sendVideo", "sendPhoto"]
+            }
+        )
+        result = config.get_endpoint_for_method("sendVideo")
+        assert result == "local.server:8081"
+
+    def test_unlisted_method_returns_default(self):
+        """Test returns default for method not in routing."""
+        config = TelegramConfig(
+            bot_api_endpoint="api.telegram.org",
+            endpoint_routing={
+                "local.server:8081": ["sendVideo"]
+            }
+        )
+        result = config.get_endpoint_for_method("getUpdates")
+        assert result == "api.telegram.org"
+
+    def test_last_endpoint_wins_for_duplicate_method(self):
+        """Test later routing entries override earlier ones."""
+        config = TelegramConfig(
+            bot_api_endpoint="api.telegram.org",
+            endpoint_routing={
+                "server1": ["sendVideo"],
+                "server2": ["sendVideo"]
+            }
+        )
+        result = config.get_endpoint_for_method("sendVideo")
+        assert result == "server2"
+
+    def test_method_in_multiple_lists_last_wins(self):
+        """Test method appearing in multiple endpoint lists."""
+        config = TelegramConfig(
+            bot_api_endpoint="default.server",
+            endpoint_routing={
+                "endpoint_a": ["sendVideo", "getUpdates"],
+                "endpoint_b": ["getUpdates", "sendMessage"]
+            }
+        )
+        # getUpdates appears in both, last wins
+        result = config.get_endpoint_for_method("getUpdates")
+        assert result == "endpoint_b"
+        # sendVideo only in first
+        result = config.get_endpoint_for_method("sendVideo")
+        assert result == "endpoint_a"
