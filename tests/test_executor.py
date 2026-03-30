@@ -5,7 +5,44 @@ import json
 import tempfile
 import os
 
-from tele.executor import run_exec_command
+from tele.executor import run_exec_command, infer_level, format_processor_line
+
+
+class TestInferLevel:
+    """Tests for level inference from processor output."""
+
+    def test_error_keywords(self):
+        assert infer_level("Error: something failed") == "ERROR"
+        assert infer_level("FAILED to process") == "ERROR"
+        assert infer_level("Exception occurred") == "ERROR"
+
+    def test_warn_keywords(self):
+        assert infer_level("Warning: check this") == "WARN "
+        assert infer_level("WARN: deprecated") == "WARN "
+
+    def test_default_info(self):
+        assert infer_level("Processing message") == "INFO "
+        assert infer_level("Download complete") == "INFO "
+
+
+class TestFormatProcessorLine:
+    """Tests for formatting processor output lines."""
+
+    def test_format_basic_line(self, monkeypatch):
+        monkeypatch.setattr('os.getpid', lambda: 12345)
+
+        # Simulate processor output interception
+        result = format_processor_line("ytdlp", "Download started", "INFO ")
+        assert '[ytdlp]' in result
+        assert '[INFO ]' in result
+        assert 'Download started' in result
+
+    def test_format_error_line(self, monkeypatch):
+        monkeypatch.setattr('os.getpid', lambda: 12345)
+
+        result = format_processor_line("ytdlp", "Error: download failed", "ERROR")
+        assert '[ytdlp]' in result
+        assert '[ERROR]' in result
 
 
 class TestExecutor:

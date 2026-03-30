@@ -3,14 +3,78 @@
 import asyncio
 import json
 import logging
+import os
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 
-from .log import DATAFLOW
+from colorama import Fore, Style, init
+
+from .log import DATAFLOW, get_process_color
+
+# Initialize colorama
+init(autoreset=True)
 
 logger = logging.getLogger(__name__)
 
 # Default timeout for processor execution (30 minutes)
 DEFAULT_EXEC_TIMEOUT = 1800
+
+# Level colors for processor output (string keys matching display names)
+LEVEL_COLORS = {
+    'DEBUG': Fore.WHITE + Style.DIM,
+    'INFO ': Fore.WHITE + Style.BRIGHT,
+    'WARN ': Fore.YELLOW,
+    'ERROR': Fore.RED,
+}
+
+
+def infer_level(line: str) -> str:
+    """Infer log level from processor output line content.
+
+    Args:
+        line: Output line from processor
+
+    Returns:
+        Level string: 'ERROR', 'WARN ', or 'INFO '
+    """
+    lower = line.lower()
+    if 'error' in lower or 'failed' in lower or 'exception' in lower or 'fatal' in lower:
+        return 'ERROR'
+    if 'warn' in lower or 'warning' in lower:
+        return 'WARN '
+    return 'INFO '
+
+
+def format_processor_line(process_name: str, line: str, level: str = None) -> str:
+    """Format a processor output line with tele logging format.
+
+    Args:
+        process_name: Processor command name (e.g., 'ytdlp', 'python')
+        line: Output line content
+        level: Level string, or None to infer from content
+
+    Returns:
+        Formatted line with prefix and colors
+    """
+    if level is None:
+        level = infer_level(line)
+
+    # Process name (5 chars)
+    proc = process_name[:5].ljust(5)
+    pid = str(os.getpid())[:5].ljust(5)
+
+    # Component for processor output
+    component = 'proc '.ljust(5)
+
+    # Timestamp
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    # Colors
+    proc_color = get_process_color(process_name)
+    level_color = LEVEL_COLORS.get(level, Fore.WHITE)
+
+    # Format
+    return f'{proc_color}[{proc}][{pid}][{component}]{level_color}[{level}] {timestamp} | {line}'
 
 
 async def run_exec_command(
