@@ -44,6 +44,15 @@ class TestFormatProcessorLine:
         assert '[ytdlp]' in result
         assert '[ERROR]' in result
 
+    def test_format_with_level_none_infers_error(self, monkeypatch):
+        """Test that level=None triggers level inference from content."""
+        monkeypatch.setattr('os.getpid', lambda: 12345)
+
+        # Pass level=None - should infer ERROR from "Error:" in content
+        result = format_processor_line("ytdlp", "Error: download failed", None)
+        assert '[ytdlp]' in result
+        assert '[ERROR]' in result
+
 
 class TestExecutor:
     """Test cases for run_exec_command."""
