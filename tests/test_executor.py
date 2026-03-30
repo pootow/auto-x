@@ -143,3 +143,67 @@ for line in sys.stdin:
         result = await run_exec_command("true", messages)
 
         assert len(result) == 0
+
+
+class TestRunExecCommandStderr:
+    """Tests for stderr interception in run_exec_command."""
+
+    @pytest.mark.asyncio
+    async def test_stderr_is_intercepted_and_formatted(self, capsys):
+        """Test that processor stderr output is intercepted and formatted."""
+        messages = [{"id": 1, "chat_id": 123, "text": "test"}]
+
+        # Command that outputs to stderr
+        cmd = 'python -c "import sys; print(\'test stderr output\', file=sys.stderr)"'
+
+        results = await run_exec_command(cmd, messages, shell=True)
+
+        # No stdout JSON means empty results (consistent with existing behavior)
+        assert len(results) == 0
+
+        # Check that stderr was captured and formatted
+        captured = capsys.readouterr()
+        # The stderr should contain the formatted output with [pytho] prefix (truncated)
+        assert 'test stderr output' in captured.err
+
+    @pytest.mark.asyncio
+    async def test_stderr_with_valid_stdout_json(self, capsys):
+        """Test that stdout JSON Lines are still parsed correctly when stderr exists."""
+        messages = [{"id": 1, "chat_id": 123, "text": "test"}]
+
+        # Use a script file to avoid quoting issues on Windows
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+            f.write('''
+import sys
+import json
+print('stderr msg', file=sys.stderr)
+print(json.dumps({"id": 1, "chat_id": 123, "status": "success"}))
+''')
+            script_path = f.name
+
+        try:
+            results = await run_exec_command(f"python {script_path}", messages, shell=True)
+
+            assert len(results) == 1
+            assert results[0]['status'] == 'success'
+
+            # Stderr should still be captured
+            captured = capsys.readouterr()
+            assert 'stderr msg' in captured.err
+        finally:
+            os.unlink(script_path)
+
+    @pytest.mark.asyncio
+    async def test_stderr_multiline_formatted_individually(self, capsys):
+        """Test that multiple stderr lines are formatted individually."""
+        messages = [{"id": 1, "chat_id": 123, "text": "test"}]
+
+        # Command that outputs multiple stderr lines
+        cmd = 'python -c "import sys; print(\'line1\', file=sys.stderr); print(\'line2\', file=sys.stderr)"'
+
+        results = await run_exec_command(cmd, messages, shell=True)
+
+        captured = capsys.readouterr()
+        # Both lines should appear in stderr output
+        assert 'line1' in captured.err
+        assert 'line2' in captured.err

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
@@ -112,25 +113,44 @@ async def run_exec_command(
 
     proc = None
     try:
-        # Execute command (stderr inherits for real-time processor logs)
+        # Extract process name from command for logging
+        # First word, handle paths by taking basename
+        cmd_first = command.split()[0] if command else "proc"
+        process_name = os.path.basename(cmd_first)
+        # Remove extension on Windows
+        if process_name.endswith('.exe'):
+            process_name = process_name[:-4]
+        process_name = process_name[:5]  # Truncate to 5 chars for display
+
+        # Execute command (capture stderr for formatting)
         if shell:
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
         else:
             proc = await asyncio.create_subprocess_exec(
                 *command.split(),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
 
         # Wait for completion with timeout
-        stdout, _ = await asyncio.wait_for(
+        stdout, stderr = await asyncio.wait_for(
             proc.communicate(stdin_data.encode()),
             timeout=timeout
         )
+
+        # Process and format stderr output
+        if stderr:
+            stderr_text = stderr.decode()
+            for line in stderr_text.strip().split('\n'):
+                if line:
+                    formatted = format_processor_line(process_name, line)
+                    print(formatted, file=sys.stderr)
 
         if proc.returncode != 0:
             logger.error("Command failed with exit code %s", proc.returncode)
