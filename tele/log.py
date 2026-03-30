@@ -178,6 +178,9 @@ def setup_logging(verbosity: int = 0) -> logging.Logger:
     # Remove existing handlers to avoid duplicates
     logger.handlers.clear()
 
+    # Prevent propagation to root logger (avoids duplicate output)
+    logger.propagate = False
+
     # Set handler with ColoredFormatter
     handler = logging.StreamHandler(sys.stderr)
     handler.setLevel(level)
