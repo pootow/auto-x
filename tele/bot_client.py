@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import aiohttp
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Any
 
 from .retry import retry_async
 
@@ -15,18 +15,41 @@ class BotClient:
 
     API_BASE = "https://{api_endpoint}/bot{token}/{method}"
 
-    def __init__(self, token: str, api_endpoint: str = "api.telegram.org", timeout: int = 30):
+    def __init__(
+        self,
+        token: str,
+        api_endpoint: str = "api.telegram.org",
+        timeout: int = 30,
+        endpoint_routing: Dict[str, List[str]] = None
+    ):
         """Initialize Bot API client.
 
         Args:
             token: Bot token from @BotFather
-            api_endpoint: API endpoint URL (default: "api.telegram.org")
+            api_endpoint: Default API endpoint URL (default: "api.telegram.org")
             timeout: Long polling timeout in seconds
+            endpoint_routing: Dict mapping endpoints to method lists
         """
         self.token = token
         self.api_endpoint = api_endpoint
         self.timeout = timeout
+        self.endpoint_routing = endpoint_routing or {}
         self._session: Optional[aiohttp.ClientSession] = None
+
+    def _get_endpoint_for_method(self, method: str) -> str:
+        """Get endpoint for a specific API method.
+
+        Args:
+            method: API method name
+
+        Returns:
+            Endpoint URL for the method
+        """
+        endpoint_for_method = None
+        for endpoint, methods in self.endpoint_routing.items():
+            if method in methods:
+                endpoint_for_method = endpoint
+        return endpoint_for_method if endpoint_for_method else self.api_endpoint
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
@@ -61,8 +84,9 @@ class BotClient:
             RuntimeError: If API returns error response
         """
         session = await self._get_session()
-        url = self.API_BASE.format(api_endpoint=self.api_endpoint, token=self.token, method=method)
-        logger.debug("Calling API method: %s with params: %s", method, params)
+        endpoint = self._get_endpoint_for_method(method)
+        url = self.API_BASE.format(api_endpoint=endpoint, token=self.token, method=method)
+        logger.debug("Calling API method: %s with params: %s (endpoint: %s)", method, params, endpoint)
 
         async with session.post(url, json=params or {}) as response:
             # Parse response body first to capture Telegram's error description
