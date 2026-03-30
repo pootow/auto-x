@@ -27,7 +27,7 @@ Usage:
 Script Flags (prefixed with +):
     +v    INFO level, print commands
     +vv   DEBUG level, print commands + debug logging
-    +vvv  TRACE level, print commands + trace logging
+    +vvv  DATAFLOW level, print commands + JSON flow logging
 """
 
 import json
@@ -43,7 +43,7 @@ from pathlib import Path
 # Add tele module to path for importing log utilities
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tele.log import setup_processor_logging, TRACE
+from tele.log import setup_processor_logging, DATAFLOW
 
 
 def parse_script_args() -> tuple[int, list[str]]:
@@ -78,7 +78,7 @@ _VERBOSITY_LEVELS = {
     0: logging.WARNING,  # default
     1: logging.INFO,     # +v
     2: logging.DEBUG,    # +vv
-    3: TRACE,            # +vvv
+    3: DATAFLOW,         # +vvv (shows JSON flow)
 }
 
 # Setup logging based on verbosity or TELE_LOG_LEVEL env var

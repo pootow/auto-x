@@ -773,6 +773,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "click" },
+    { name = "colorama" },
     { name = "python-dateutil" },
     { name = "pyyaml" },
     { name = "telethon" },
@@ -788,6 +789,7 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.8.0" },
     { name = "click", specifier = ">=8.0.0" },
+    { name = "colorama", specifier = ">=0.4.6" },
     { name = "python-dateutil", specifier = ">=2.8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "telethon", specifier = ">=1.28.0" },

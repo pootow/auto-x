@@ -9,8 +9,9 @@ from tele.log import (
     get_logger,
     get_log_level_name,
     setup_processor_logging,
-    TRACE,
     DATAFLOW,
+    ColoredFormatter,
+    COMPONENT_MAP,
 )
 
 
@@ -26,14 +27,11 @@ class TestGetLogLevelName:
     def test_verbosity_2_returns_debug(self):
         assert get_log_level_name(2) == "DEBUG"
 
-    def test_verbosity_3_returns_trace(self):
-        assert get_log_level_name(3) == "TRACE"
+    def test_verbosity_3_returns_dataflow(self):
+        assert get_log_level_name(3) == "DATAFLOW"
 
-    def test_verbosity_4_returns_dataflow(self):
+    def test_verbosity_4_capped_at_dataflow(self):
         assert get_log_level_name(4) == "DATAFLOW"
-
-    def test_verbosity_5_capped_at_dataflow(self):
-        assert get_log_level_name(5) == "DATAFLOW"
 
     def test_verbosity_10_capped_at_dataflow(self):
         assert get_log_level_name(10) == "DATAFLOW"
@@ -54,12 +52,8 @@ class TestSetupLogging:
         logger = setup_logging(2)
         assert logger.level == logging.DEBUG
 
-    def test_sets_trace_level_with_vvv(self):
+    def test_sets_dataflow_level_with_vvv(self):
         logger = setup_logging(3)
-        assert logger.level == TRACE
-
-    def test_sets_dataflow_level_with_vvvv(self):
-        logger = setup_logging(4)
         assert logger.level == DATAFLOW
 
     def test_logger_name_is_tele(self):
@@ -70,7 +64,7 @@ class TestSetupLogging:
         logger = setup_logging(1)  # INFO level
         logger.info("Test message")
         captured = capsys.readouterr()
-        assert "[INFO] Test message" in captured.err
+        assert "Test message" in captured.err
         assert captured.out == ""  # Nothing to stdout
 
     def test_warning_level_filters_info(self, capsys):
@@ -121,11 +115,6 @@ class TestSetupProcessorLogging:
         logger = setup_processor_logging()
         assert logger.level == logging.DEBUG
 
-    def test_uses_env_var_trace(self, monkeypatch):
-        monkeypatch.setenv("TELE_LOG_LEVEL", "TRACE")
-        logger = setup_processor_logging()
-        assert logger.level == TRACE
-
     def test_uses_env_var_dataflow(self, monkeypatch):
         monkeypatch.setenv("TELE_LOG_LEVEL", "DATAFLOW")
         logger = setup_processor_logging()
@@ -151,45 +140,118 @@ class TestSetupProcessorLogging:
         logger = setup_processor_logging()
         logger.info("Processor message")
         captured = capsys.readouterr()
-        assert "[INFO] Processor message" in captured.err
+        assert "Processor message" in captured.err
         assert captured.out == ""  # Nothing to stdout
-
-
-class TestTraceLevel:
-    """Tests for TRACE log level."""
-
-    def test_trace_is_below_debug(self):
-        assert TRACE < logging.DEBUG
-
-    def test_trace_value_is_5(self):
-        assert TRACE == 5
-
-    def test_trace_level_name_registered(self):
-        assert logging.getLevelName(TRACE) == "TRACE"
 
 
 class TestDataflowLevel:
     """Tests for DATAFLOW log level."""
 
-    def test_dataflow_is_below_trace(self):
-        assert DATAFLOW < TRACE
+    def test_dataflow_is_between_debug_and_info(self):
+        assert logging.DEBUG < DATAFLOW < logging.INFO
 
-    def test_dataflow_value_is_3(self):
-        assert DATAFLOW == 3
+    def test_dataflow_value_is_15(self):
+        assert DATAFLOW == 15
 
     def test_dataflow_level_name_registered(self):
         assert logging.getLevelName(DATAFLOW) == "DATAFLOW"
 
     def test_dataflow_shows_json_output(self, capsys):
-        logger = setup_logging(4)  # DATAFLOW level
-        logger.log(DATAFLOW, '>>> {"id": 1, "chat_id": 123}')
+        logger = setup_logging(3)  # DATAFLOW level
+        logger.log(DATAFLOW, '{"id": 1, "chat_id": 123}')
         captured = capsys.readouterr()
-        assert '[DATAFLOW] >>> {"id": 1, "chat_id": 123}' in captured.err
+        assert '{"id": 1, "chat_id": 123}' in captured.err
 
-    def test_trace_filters_dataflow(self, capsys):
-        logger = setup_logging(3)  # TRACE level
+    def test_debug_shows_dataflow(self, capsys):
+        logger = setup_logging(2)  # DEBUG level
+        logger.log(DATAFLOW, "This should appear")
+        logger.debug("This should also appear")
+        captured = capsys.readouterr()
+        assert "This should appear" in captured.err
+        assert "This should also appear" in captured.err
+
+    def test_info_filters_dataflow(self, capsys):
+        logger = setup_logging(1)  # INFO level
         logger.log(DATAFLOW, "This should be filtered")
-        logger.log(TRACE, "This should appear")
+        logger.info("This should appear")
         captured = capsys.readouterr()
         assert "This should be filtered" not in captured.err
         assert "This should appear" in captured.err
+
+
+class TestColoredFormatter:
+    """Tests for ColoredFormatter."""
+
+    def test_format_produces_fixed_width_output(self, monkeypatch):
+        """Test that format produces correct fixed-width output."""
+        # Mock PID
+        monkeypatch.setattr(os, 'getpid', lambda: 12345)
+
+        formatter = ColoredFormatter(
+            process_name='tele',
+            component='poll'
+        )
+
+        # Create a log record
+        record = logging.LogRecord(
+            name='tele.bot',
+            level=logging.INFO,
+            pathname='test.py',
+            lineno=1,
+            msg='Connected to Telegram',
+            args=(),
+            exc_info=None
+        )
+
+        result = formatter.format(record)
+
+        # Should match format: [tele ][12345][poll ][INFO ] YYYY-MM-DD HH:MM:SS | Connected to Telegram
+        # Note: process_name is padded to 5 chars, so 'tele' becomes 'tele '
+        assert '[tele ]' in result
+        assert '[12345]' in result
+        assert '[poll ]' in result
+        assert '[INFO ]' in result
+        assert ' | Connected to Telegram' in result
+
+    def test_format_warn_level(self, monkeypatch):
+        """Test WARN level formatting."""
+        monkeypatch.setattr(os, 'getpid', lambda: 12345)
+
+        formatter = ColoredFormatter(process_name='tele', component='poll')
+
+        record = logging.LogRecord(
+            name='tele.bot',
+            level=logging.WARNING,
+            pathname='test.py',
+            lineno=1,
+            msg='Retry failed',
+            args=(),
+            exc_info=None
+        )
+
+        result = formatter.format(record)
+        assert '[WARN ]' in result
+
+    def test_format_dataflow_level(self, monkeypatch):
+        """Test DATAFLOW level shows INFO with [flow ] prefix."""
+        monkeypatch.setattr(os, 'getpid', lambda: 12345)
+
+        formatter = ColoredFormatter(process_name='tele', component='exec')
+
+        # DATAFLOW level value is 15
+        record = logging.LogRecord(
+            name='tele.executor',
+            level=15,  # DATAFLOW
+            pathname='test.py',
+            lineno=1,
+            msg='{"id": 123}',
+            args=(),
+            exc_info=None
+        )
+        record.levelname = 'DATAFLOW'
+
+        result = formatter.format(record)
+
+        # DATAFLOW should display as INFO with [flow ] prefix
+        assert '[INFO ]' in result
+        assert '[flow ] {"id": 123}' in result

@@ -14,7 +14,7 @@ import os
 # Add tele module to path for importing log utilities
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 
-from tele.log import setup_processor_logging, TRACE
+from tele.log import setup_processor_logging
 
 # Setup logging based on TELE_LOG_LEVEL env var
 setup_processor_logging()
