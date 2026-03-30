@@ -57,6 +57,59 @@ class TestConfig:
         assert data["defaults"]["reaction"] == "👍"
         assert data["defaults"]["batch_size"] == 200
 
+    def test_from_dict_with_endpoint_routing(self):
+        """Test creating config with endpoint_routing."""
+        data = {
+            "telegram": {
+                "api_id": 12345,
+                "api_hash": "test_hash",
+                "endpoint_routing": {
+                    "local.server:8081": {
+                        "methods": ["sendVideo", "sendPhoto"]
+                    },
+                    "api.telegram.org": {
+                        "methods": ["getUpdates"]
+                    }
+                }
+            },
+        }
+        config = Config.from_dict(data)
+        assert config.telegram.endpoint_routing == {
+            "local.server:8081": ["sendVideo", "sendPhoto"],
+            "api.telegram.org": ["getUpdates"]
+        }
+
+    def test_to_dict_with_endpoint_routing(self):
+        """Test serializing config with endpoint_routing."""
+        config = Config(
+            telegram=TelegramConfig(
+                api_id=12345,
+                api_hash="test_hash",
+                endpoint_routing={
+                    "local.server:8081": ["sendVideo", "sendPhoto"]
+                }
+            ),
+        )
+        data = config.to_dict()
+        assert data["telegram"]["endpoint_routing"] == {
+            "local.server:8081": {"methods": ["sendVideo", "sendPhoto"]}
+        }
+
+    def test_endpoint_routing_normalization(self):
+        """Test endpoint URLs are normalized in routing."""
+        data = {
+            "telegram": {
+                "endpoint_routing": {
+                    "https://local.server:8081/": {
+                        "methods": ["sendVideo"]
+                    }
+                }
+            }
+        }
+        config = Config.from_dict(data)
+        assert "local.server:8081" in config.telegram.endpoint_routing
+        assert "https://local.server:8081/" not in config.telegram.endpoint_routing
+
 
 class TestConfigManager:
     """Test cases for ConfigManager."""

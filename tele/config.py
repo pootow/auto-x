@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional, Any, Dict, List
 from dataclasses import dataclass, field
 
 import yaml
@@ -35,6 +35,7 @@ class TelegramConfig:
     bot_token: Optional[str] = None
     bot_api_endpoint: str = "api.telegram.org"
     session_name: str = "tele_tool"
+    endpoint_routing: Dict[str, List[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -64,6 +65,14 @@ class Config:
         telegram_data = data.get('telegram', {})
         defaults_data = data.get('defaults', {})
 
+        # Parse endpoint_routing with normalization
+        endpoint_routing_raw = telegram_data.get('endpoint_routing', {})
+        endpoint_routing = {}
+        for endpoint, routing_data in endpoint_routing_raw.items():
+            normalized_endpoint = _normalize_api_endpoint(endpoint)
+            methods = routing_data.get('methods', [])
+            endpoint_routing[normalized_endpoint] = methods
+
         telegram = TelegramConfig(
             api_id=telegram_data.get('api_id'),
             api_hash=telegram_data.get('api_hash'),
@@ -72,6 +81,7 @@ class Config:
                 telegram_data.get('bot_api_endpoint', 'api.telegram.org')
             ),
             session_name=telegram_data.get('session_name', 'tele_tool'),
+            endpoint_routing=endpoint_routing,
         )
 
         defaults = DefaultsConfig(
@@ -95,6 +105,10 @@ class Config:
                 'bot_token': self.telegram.bot_token,
                 'bot_api_endpoint': self.telegram.bot_api_endpoint,
                 'session_name': self.telegram.session_name,
+                'endpoint_routing': {
+                    endpoint: {'methods': methods}
+                    for endpoint, methods in self.telegram.endpoint_routing.items()
+                },
             },
             'defaults': {
                 'chat': self.defaults.chat,
