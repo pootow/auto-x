@@ -103,7 +103,13 @@ async def run_exec_command(
         if proc and proc.returncode is None:
             try:
                 proc.kill()
-                await proc.wait()
+                # On Windows, kill() may not terminate child processes
+                # Use wait() with timeout to avoid hanging indefinitely
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    # Process didn't terminate, log and continue
+                    logger.warning("Process did not terminate after kill()")
             except Exception:
                 pass
         # Return error status for all messages - they will be retried
