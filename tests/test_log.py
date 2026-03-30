@@ -52,9 +52,10 @@ class TestSetupLogging:
         logger = setup_logging(2)
         assert logger.level == logging.DEBUG
 
-    def test_sets_dataflow_level_with_vvv(self):
+    def test_sets_debug_level_with_vvv(self):
+        """-vvv also uses DEBUG level (shows DEBUG and DATAFLOW messages)."""
         logger = setup_logging(3)
-        assert logger.level == DATAFLOW
+        assert logger.level == logging.DEBUG
 
     def test_logger_name_is_tele(self):
         logger = setup_logging(0)

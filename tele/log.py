@@ -11,9 +11,9 @@ from colorama import Fore, Style, init
 init(autoreset=True)
 
 # DATAFLOW level (between DEBUG and INFO) - shows raw JSON in pipeline
-# At INFO level (verbosity=1), shows DATAFLOW messages with [flow ] prefix
-# At DEBUG level (verbosity=2), DATAFLOW messages are filtered out
-DATAFLOW = 15  # Between DEBUG(10) and INFO(20)
+# DEBUG level (-vv) shows DATAFLOW messages because 15 >= 10
+# INFO level (-v) filters out DATAFLOW because 15 < 20
+DATAFLOW = 15
 
 # TRACE removed - merged into DEBUG
 
@@ -163,7 +163,7 @@ def setup_logging(verbosity: int = 0) -> logging.Logger:
     Returns:
         Configured logger for tele
     """
-    levels = [logging.WARNING, logging.INFO, logging.DEBUG, DATAFLOW]
+    levels = [logging.WARNING, logging.INFO, logging.DEBUG, logging.DEBUG]
     level = levels[min(verbosity, 3)]
 
     logger = logging.getLogger('tele')
