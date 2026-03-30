@@ -163,6 +163,7 @@ class TestDataflowLevel:
         assert '{"id": 1, "chat_id": 123}' in captured.err
 
     def test_debug_shows_dataflow(self, capsys):
+        """DEBUG level should show DATAFLOW messages (DATAFLOW=15 >= DEBUG=10)."""
         logger = setup_logging(2)  # DEBUG level
         logger.log(DATAFLOW, "This should appear")
         logger.debug("This should also appear")

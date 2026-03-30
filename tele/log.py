@@ -11,7 +11,9 @@ from colorama import Fore, Style, init
 init(autoreset=True)
 
 # DATAFLOW level (between DEBUG and INFO) - shows raw JSON in pipeline
-DATAFLOW = 15  # Was 3, now between DEBUG(10) and INFO(20)
+# At INFO level (verbosity=1), shows DATAFLOW messages with [flow ] prefix
+# At DEBUG level (verbosity=2), DATAFLOW messages are filtered out
+DATAFLOW = 15  # Between DEBUG(10) and INFO(20)
 
 # TRACE removed - merged into DEBUG
 
