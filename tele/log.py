@@ -94,22 +94,25 @@ def get_process_color(process_name: str) -> str:
 class ColoredFormatter(logging.Formatter):
     """Formatter with fixed-width prefix and level-based colors.
 
-    Format: [tele][12345][poll ][INFO ] YYYY-MM-DD HH:MM:SS | Message
+    Format (with PID): [tele][12345][poll ][INFO ] YYYY-MM-DD HH:MM:SS | Message
+    Format (without PID): [tele][poll ][INFO ] YYYY-MM-DD HH:MM:SS | Message
 
-    For DATAFLOW: [tele][12345][exec ][INFO ] YYYY-MM-DD HH:MM:SS | [flow ] Message
+    For DATAFLOW: [tele][poll ][INFO ] YYYY-MM-DD HH:MM:SS | [flow ] Message
     """
 
-    def __init__(self, process_name: str = 'tele', component: str = None):
+    def __init__(self, process_name: str = 'tele', component: str = None, show_pid: bool = False):
         """Initialize formatter.
 
         Args:
             process_name: Process name (5 chars max)
             component: Component name (5 chars max), or None to infer from logger
+            show_pid: Whether to show PID in output (default: False)
         """
         super().__init__()
         self.process_name = process_name[:5].ljust(5)
         self.component = component
         self.pid = str(os.getpid())[:5].ljust(5)
+        self.show_pid = show_pid
         self.process_color = get_process_color(process_name)
 
     def format(self, record: logging.LogRecord) -> str:
@@ -136,8 +139,11 @@ class ColoredFormatter(logging.Formatter):
         # Timestamp (local time, no timezone)
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        # Build prefix
-        prefix = f'{self.process_color}[{self.process_name}][{self.pid}][{component}]{level_color}[{level_display}]'
+        # Build prefix (with or without PID)
+        if self.show_pid:
+            prefix = f'{self.process_color}[{self.process_name}][{self.pid}][{component}]{level_color}[{level_display}]'
+        else:
+            prefix = f'{self.process_color}[{self.process_name}][{component}]{level_color}[{level_display}]'
 
         # Message
         msg = record.getMessage()
@@ -245,7 +251,7 @@ def setup_processor_logging() -> logging.Logger:
     # Output to stderr ONLY
     handler = logging.StreamHandler(sys.stderr)
     handler.setLevel(level)
-    handler.setFormatter(ColoredFormatter(process_name=process_name))
+    handler.setFormatter(ColoredFormatter(process_name=process_name, show_pid=True))
     logger.addHandler(handler)
 
     return logger

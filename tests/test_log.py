@@ -185,7 +185,7 @@ class TestColoredFormatter:
     """Tests for ColoredFormatter."""
 
     def test_format_produces_fixed_width_output(self, monkeypatch):
-        """Test that format produces correct fixed-width output."""
+        """Test that format produces correct fixed-width output (no PID by default)."""
         # Mock PID
         monkeypatch.setattr(os, 'getpid', lambda: 12345)
 
@@ -207,13 +207,36 @@ class TestColoredFormatter:
 
         result = formatter.format(record)
 
-        # Should match format: [tele ][12345][poll ][INFO ] YYYY-MM-DD HH:MM:SS | Connected to Telegram
+        # Should match format: [tele ][poll ][INFO ] YYYY-MM-DD HH:MM:SS | Connected to Telegram
         # Note: process_name is padded to 5 chars, so 'tele' becomes 'tele '
         assert '[tele ]' in result
-        assert '[12345]' in result
         assert '[poll ]' in result
         assert '[INFO ]' in result
         assert ' | Connected to Telegram' in result
+        # PID should NOT be shown by default
+        assert '[12345]' not in result
+
+    def test_format_with_pid(self, monkeypatch):
+        """Test that PID is shown when show_pid=True."""
+        monkeypatch.setattr(os, 'getpid', lambda: 12345)
+
+        formatter = ColoredFormatter(process_name='ytdlp', component='proc ', show_pid=True)
+
+        record = logging.LogRecord(
+            name='tele.executor',
+            level=logging.INFO,
+            pathname='test.py',
+            lineno=1,
+            msg='Download started',
+            args=(),
+            exc_info=None
+        )
+
+        result = formatter.format(record)
+        assert '[ytdlp]' in result
+        assert '[12345]' in result
+        assert '[proc ]' in result
+        assert '[INFO ]' in result
 
     def test_format_warn_level(self, monkeypatch):
         """Test WARN level formatting."""
