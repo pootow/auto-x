@@ -49,6 +49,11 @@ def infer_level(line: str) -> str:
 def format_processor_line(process_name: str, line: str, level: str = None) -> str:
     """Format a processor output line with tele logging format.
 
+    Format: [proc ][ytdlp ][12345][INFO ] timestamp | message
+    - "proc " indicates this is a processor (equivalent to "tele" in main process)
+    - process_name is the processor name (e.g., 'ytdlp', 'python')
+    - PID distinguishes concurrent processor instances
+
     Args:
         process_name: Processor command name (e.g., 'ytdlp', 'python')
         line: Output line content
@@ -60,22 +65,22 @@ def format_processor_line(process_name: str, line: str, level: str = None) -> st
     if level is None:
         level = infer_level(line)
 
-    # Process name (5 chars)
+    # Fixed prefix: "proc " to indicate processor (equivalent to "tele")
+    prefix = 'proc '.ljust(5)
+    # Process name (5 chars) - acts like component/module
     proc = process_name[:5].ljust(5)
+    # PID distinguishes concurrent processors
     pid = str(os.getpid())[:5].ljust(5)
-
-    # Component for processor output
-    component = 'proc '.ljust(5)
 
     # Timestamp
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # Colors
+    # Colors - use process_name for color to distinguish different processors
     proc_color = get_process_color(process_name)
     level_color = LEVEL_COLORS.get(level, Fore.WHITE)
 
-    # Format
-    return f'{proc_color}[{proc}][{pid}][{component}]{level_color}[{level}] {timestamp} | {line}'
+    # Format: [proc ][ytdlp ][12345][INFO ] timestamp | message
+    return f'{proc_color}[{prefix}][{proc}][{pid}]{level_color}[{level}] {timestamp} | {line}'
 
 
 async def run_exec_command(

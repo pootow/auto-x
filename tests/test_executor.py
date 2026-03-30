@@ -31,9 +31,11 @@ class TestFormatProcessorLine:
     def test_format_basic_line(self, monkeypatch):
         monkeypatch.setattr('os.getpid', lambda: 12345)
 
-        # Simulate processor output interception
+        # Format: [proc ][ytdlp ][12345][INFO ] timestamp | message
         result = format_processor_line("ytdlp", "Download started", "INFO ")
-        assert '[ytdlp]' in result
+        assert '[proc ]' in result  # Fixed prefix for processors
+        assert '[ytdlp]' in result  # Process name
+        assert '[12345]' in result  # PID
         assert '[INFO ]' in result
         assert 'Download started' in result
 
@@ -41,6 +43,7 @@ class TestFormatProcessorLine:
         monkeypatch.setattr('os.getpid', lambda: 12345)
 
         result = format_processor_line("ytdlp", "Error: download failed", "ERROR")
+        assert '[proc ]' in result
         assert '[ytdlp]' in result
         assert '[ERROR]' in result
 
@@ -50,6 +53,7 @@ class TestFormatProcessorLine:
 
         # Pass level=None - should infer ERROR from "Error:" in content
         result = format_processor_line("ytdlp", "Error: download failed", None)
+        assert '[proc ]' in result
         assert '[ytdlp]' in result
         assert '[ERROR]' in result
 
