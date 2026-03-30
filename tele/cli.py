@@ -219,7 +219,11 @@ async def run_bot_mode(
         except ValueError:
             raise click.ClickException("Chat must be numeric ID in bot mode")
 
-    client = BotClient(config.telegram.bot_token, config.telegram.bot_api_endpoint)
+    client = BotClient(
+        config.telegram.bot_token,
+        config.telegram.bot_api_endpoint,
+        endpoint_routing=config.telegram.endpoint_routing
+    )
     state_mgr = BotStateManager()
     msg_filter = create_filter(filter_expr) if filter_expr else None
 
@@ -821,7 +825,11 @@ async def run_retry_dead(
 
     logger.info("Found %s dead-letter entries", len(entries))
 
-    client = BotClient(config.telegram.bot_token, config.telegram.bot_api_endpoint)
+    client = BotClient(
+        config.telegram.bot_token,
+        config.telegram.bot_api_endpoint,
+        endpoint_routing=config.telegram.endpoint_routing
+    )
 
     try:
         success_ids = []
