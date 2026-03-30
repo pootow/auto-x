@@ -46,7 +46,7 @@ def infer_level(line: str) -> str:
     return 'INFO '
 
 
-def format_processor_line(process_name: str, line: str, level: str = None) -> str:
+def format_processor_line(process_name: str, line: str, level: str = None, pid: int = None) -> str:
     """Format a processor output line with tele logging format.
 
     Format: [proc ][ytdlp ][12345][INFO ] timestamp | message
@@ -58,6 +58,7 @@ def format_processor_line(process_name: str, line: str, level: str = None) -> st
         process_name: Processor command name (e.g., 'ytdlp', 'python')
         line: Output line content
         level: Level string, or None to infer from content
+        pid: Processor process ID (if None, uses current process PID)
 
     Returns:
         Formatted line with prefix and colors
@@ -69,8 +70,11 @@ def format_processor_line(process_name: str, line: str, level: str = None) -> st
     prefix = 'proc '.ljust(5)
     # Process name (5 chars) - acts like component/module
     proc = process_name[:5].ljust(5)
-    # PID distinguishes concurrent processors
-    pid = str(os.getpid())[:5].ljust(5)
+    # PID distinguishes concurrent processors (use provided pid or fallback to current)
+    if pid is not None:
+        pid_str = str(pid)[:5].ljust(5)
+    else:
+        pid_str = str(os.getpid())[:5].ljust(5)
 
     # Timestamp
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -80,7 +84,7 @@ def format_processor_line(process_name: str, line: str, level: str = None) -> st
     level_color = LEVEL_COLORS.get(level, Fore.WHITE)
 
     # Format: [proc ][ytdlp ][12345][INFO ] timestamp | message
-    return f'{proc_color}[{prefix}][{proc}][{pid}]{level_color}[{level}] {timestamp} | {line}'
+    return f'{proc_color}[{prefix}][{proc}][{pid_str}]{level_color}[{level}] {timestamp} | {line}'
 
 
 async def run_exec_command(
@@ -149,12 +153,12 @@ async def run_exec_command(
             timeout=timeout
         )
 
-        # Process and format stderr output
+        # Process and format stderr output with processor's PID
         if stderr:
             stderr_text = stderr.decode()
             for line in stderr_text.strip().split('\n'):
                 if line:
-                    formatted = format_processor_line(process_name, line)
+                    formatted = format_processor_line(process_name, line, pid=proc.pid)
                     print(formatted, file=sys.stderr)
 
         if proc.returncode != 0:

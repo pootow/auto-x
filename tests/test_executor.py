@@ -28,33 +28,36 @@ class TestInferLevel:
 class TestFormatProcessorLine:
     """Tests for formatting processor output lines."""
 
-    def test_format_basic_line(self, monkeypatch):
-        monkeypatch.setattr('os.getpid', lambda: 12345)
-
-        # Format: [proc ][ytdlp ][12345][INFO ] timestamp | message
-        result = format_processor_line("ytdlp", "Download started", "INFO ")
+    def test_format_with_explicit_pid(self):
+        """Test format with explicit processor PID."""
+        # Format: [proc ][ytdlp ][99999][INFO ] timestamp | message
+        result = format_processor_line("ytdlp", "Download started", "INFO ", pid=99999)
         assert '[proc ]' in result  # Fixed prefix for processors
         assert '[ytdlp]' in result  # Process name
-        assert '[12345]' in result  # PID
+        assert '[99999]' in result  # Explicit PID
         assert '[INFO ]' in result
         assert 'Download started' in result
 
-    def test_format_error_line(self, monkeypatch):
-        monkeypatch.setattr('os.getpid', lambda: 12345)
+    def test_format_with_different_pids(self):
+        """Test that different PIDs are displayed correctly."""
+        result1 = format_processor_line("ytdlp", "msg1", "INFO ", pid=11111)
+        result2 = format_processor_line("ytdlp", "msg2", "INFO ", pid=22222)
+        assert '[11111]' in result1
+        assert '[22222]' in result2
 
-        result = format_processor_line("ytdlp", "Error: download failed", "ERROR")
+    def test_format_error_line(self):
+        result = format_processor_line("ytdlp", "Error: download failed", "ERROR", pid=12345)
         assert '[proc ]' in result
         assert '[ytdlp]' in result
+        assert '[12345]' in result
         assert '[ERROR]' in result
 
-    def test_format_with_level_none_infers_error(self, monkeypatch):
+    def test_format_with_level_none_infers_error(self):
         """Test that level=None triggers level inference from content."""
-        monkeypatch.setattr('os.getpid', lambda: 12345)
-
-        # Pass level=None - should infer ERROR from "Error:" in content
-        result = format_processor_line("ytdlp", "Error: download failed", None)
+        result = format_processor_line("ytdlp", "Error: download failed", None, pid=12345)
         assert '[proc ]' in result
         assert '[ytdlp]' in result
+        assert '[12345]' in result
         assert '[ERROR]' in result
 
 
