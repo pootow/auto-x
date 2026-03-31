@@ -4,9 +4,10 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from colorama import Fore, Style, init
 
@@ -28,25 +29,34 @@ LEVEL_COLORS = {
     'ERROR': Fore.RED,
 }
 
+# Pattern for simple format prefix: [INFO ], [DEBUG], [WARN ], [ERROR]
+SIMPLE_PREFIX_PATTERN = re.compile(r'^\[(INFO |DEBUG|WARN |ERROR)\]\s*')
 
-def infer_level(line: str) -> str:
-    """Infer log level from processor output line content.
+
+def infer_level(line: str) -> Tuple[str, str]:
+    """Infer log level and strip simple format prefix if present.
 
     Args:
         line: Output line from processor
 
     Returns:
-        Level string: 'ERROR', 'WARN ', or 'INFO '
+        (level, stripped_line) tuple - level is 'ERROR', 'WARN ', or 'INFO '
     """
+    # Check for simple format prefix from processor's SimpleFormatter
+    match = SIMPLE_PREFIX_PATTERN.match(line)
+    if match:
+        return match.group(1), line[match.end():]
+
+    # Fallback: infer from content
     lower = line.lower()
     if 'error' in lower or 'failed' in lower or 'exception' in lower or 'fatal' in lower:
-        return 'ERROR'
+        return 'ERROR', line
     if 'warn' in lower or 'warning' in lower:
-        return 'WARN '
-    return 'INFO '
+        return 'WARN ', line
+    return 'INFO ', line
 
 
-def format_processor_line(process_name: str, line: str, level: str = None, pid: int = None) -> str:
+def format_processor_line(process_name: str, line: str, pid: int = None) -> str:
     """Format a processor output line with tele logging format.
 
     Format: [proc ][ytdlp ][12345][INFO ] timestamp | message
@@ -56,15 +66,14 @@ def format_processor_line(process_name: str, line: str, level: str = None, pid: 
 
     Args:
         process_name: Processor command name (e.g., 'ytdlp', 'python')
-        line: Output line content
-        level: Level string, or None to infer from content
+        line: Output line content (may have [LEVEL] prefix from processor)
         pid: Processor process ID (if None, uses current process PID)
 
     Returns:
         Formatted line with prefix and colors
     """
-    if level is None:
-        level = infer_level(line)
+    # Extract level and strip any [LEVEL] prefix from processor's SimpleFormatter
+    level, stripped_line = infer_level(line)
 
     # Fixed prefix: "proc " to indicate processor (equivalent to "tele")
     prefix = 'proc '.ljust(5)
@@ -84,7 +93,7 @@ def format_processor_line(process_name: str, line: str, level: str = None, pid: 
     level_color = LEVEL_COLORS.get(level, Fore.WHITE)
 
     # Format: [proc ][ytdlp ][12345][INFO ] timestamp | message
-    return f'{proc_color}[{prefix}][{proc}][{pid_str}]{level_color}[{level}] {timestamp} | {line}'
+    return f'{proc_color}[{prefix}][{proc}][{pid_str}]{level_color}[{level}] {timestamp} | {stripped_line}'
 
 
 async def run_exec_command(

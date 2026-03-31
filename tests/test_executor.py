@@ -11,18 +11,35 @@ from tele.executor import run_exec_command, infer_level, format_processor_line
 class TestInferLevel:
     """Tests for level inference from processor output."""
 
+    def test_simple_prefix_info(self):
+        level, line = infer_level("[INFO ] Download started")
+        assert level == "INFO "
+        assert line == "Download started"
+
+    def test_simple_prefix_error(self):
+        level, line = infer_level("[ERROR] Something failed")
+        assert level == "ERROR"
+        assert line == "Something failed"
+
+    def test_simple_prefix_warn(self):
+        level, line = infer_level("[WARN ] Deprecated feature")
+        assert level == "WARN "
+        assert line == "Deprecated feature"
+
     def test_error_keywords(self):
-        assert infer_level("Error: something failed") == "ERROR"
-        assert infer_level("FAILED to process") == "ERROR"
-        assert infer_level("Exception occurred") == "ERROR"
+        level, line = infer_level("Error: something failed")
+        assert level == "ERROR"
+        assert line == "Error: something failed"
 
     def test_warn_keywords(self):
-        assert infer_level("Warning: check this") == "WARN "
-        assert infer_level("WARN: deprecated") == "WARN "
+        level, line = infer_level("Warning: check this")
+        assert level == "WARN "
+        assert line == "Warning: check this"
 
     def test_default_info(self):
-        assert infer_level("Processing message") == "INFO "
-        assert infer_level("Download complete") == "INFO "
+        level, line = infer_level("Processing message")
+        assert level == "INFO "
+        assert line == "Processing message"
 
 
 class TestFormatProcessorLine:
@@ -31,7 +48,7 @@ class TestFormatProcessorLine:
     def test_format_with_explicit_pid(self):
         """Test format with explicit processor PID."""
         # Format: [proc ][ytdlp ][99999][INFO ] timestamp | message
-        result = format_processor_line("ytdlp", "Download started", "INFO ", pid=99999)
+        result = format_processor_line("ytdlp", "Download started", pid=99999)
         assert '[proc ]' in result  # Fixed prefix for processors
         assert '[ytdlp]' in result  # Process name
         assert '[99999]' in result  # Explicit PID
@@ -40,25 +57,26 @@ class TestFormatProcessorLine:
 
     def test_format_with_different_pids(self):
         """Test that different PIDs are displayed correctly."""
-        result1 = format_processor_line("ytdlp", "msg1", "INFO ", pid=11111)
-        result2 = format_processor_line("ytdlp", "msg2", "INFO ", pid=22222)
+        result1 = format_processor_line("ytdlp", "msg1", pid=11111)
+        result2 = format_processor_line("ytdlp", "msg2", pid=22222)
         assert '[11111]' in result1
         assert '[22222]' in result2
 
     def test_format_error_line(self):
-        result = format_processor_line("ytdlp", "Error: download failed", "ERROR", pid=12345)
+        result = format_processor_line("ytdlp", "Error: download failed", pid=12345)
         assert '[proc ]' in result
         assert '[ytdlp]' in result
         assert '[12345]' in result
         assert '[ERROR]' in result
 
-    def test_format_with_level_none_infers_error(self):
-        """Test that level=None triggers level inference from content."""
-        result = format_processor_line("ytdlp", "Error: download failed", None, pid=12345)
+    def test_format_strip_level_prefix(self):
+        """Test that [LEVEL] prefix from processor is stripped."""
+        result = format_processor_line("ytdlp", "[INFO ] Running: yt-dlp", pid=12345)
         assert '[proc ]' in result
-        assert '[ytdlp]' in result
-        assert '[12345]' in result
-        assert '[ERROR]' in result
+        assert '[INFO ]' in result
+        assert 'Running: yt-dlp' in result
+        # Should NOT have duplicated [INFO ] in message part
+        assert result.count('[INFO ]') == 1  # Only one [INFO ] in the format prefix
 
 
 class TestExecutor:

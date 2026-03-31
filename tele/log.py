@@ -223,9 +223,10 @@ def get_log_level_name(verbosity: int) -> str:
 
 
 def setup_processor_logging() -> logging.Logger:
-    """Setup logging for processors based on TELE_LOG_LEVEL env var.
+    """Setup logging for processors - simple format, executor handles full formatting.
 
     Processors log to stderr only - stdout is reserved for JSON Lines output.
+    Output format: [LEVEL] message (executor adds full [proc][name][pid] prefix)
 
     Returns:
         Configured root logger
@@ -248,13 +249,16 @@ def setup_processor_logging() -> logging.Logger:
     # Remove existing handlers to avoid duplicates
     logger.handlers.clear()
 
-    # Process name from env or default
-    process_name = os.environ.get('TELE_PROCESS_NAME', 'proc')[:5].ljust(5)
+    # Simple formatter - just level and message
+    # Executor will add the full [proc][name][pid] prefix
+    class SimpleFormatter(logging.Formatter):
+        def format(self, record):
+            level_display = LEVEL_DISPLAY.get(record.levelno, 'INFO ')
+            return f'[{level_display}] {record.getMessage()}'
 
-    # Output to stderr ONLY
     handler = logging.StreamHandler(sys.stderr)
     handler.setLevel(level)
-    handler.setFormatter(ColoredFormatter(process_name=process_name, show_pid=True))
+    handler.setFormatter(SimpleFormatter())
     logger.addHandler(handler)
 
     return logger
