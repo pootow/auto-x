@@ -51,6 +51,29 @@ Bot runs as foreground daemon, polls for new messages, batches them, pipes to pr
 - No search support (Bot API limitation)
 - At-least-once delivery (processor must be idempotent)
 
+### Ingest Mode: External Data Sources
+
+```bash
+tele --ingest                    # Start daemon (watchdog + polling)
+tele --scan                      # Scan all sources once
+tele --process-source web_monitor  # Process specific source
+```
+
+External data sources (web monitors, RSS feeds, custom scripts) write to append-only JSONL files. Tele consumes and processes through existing pipeline.
+
+**Ingest Mode Flow**:
+1. Data source appends messages to `incoming.{date}.jsonl`
+2. Watchdog detects file change (immediate) OR polling scans (fallback)
+3. Read from last byte offset, process new messages
+4. Pipe to configured processor via stdin (JSON Lines)
+5. Update byte offset on success
+
+**Ingest Mode Constraints**:
+- File-based communication (no HTTP/TCP)
+- Append-only files preserved as audit logs
+- Date in filename must increase monotonically
+- Cross-platform: watchdog + polling fallback
+
 ## Constraints
 
 | Constraint | Rationale |

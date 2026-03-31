@@ -32,6 +32,12 @@ tele --mark [--reaction "✅"]                                # Mark from stdin
 tele --bot --exec "processor" [--chat "id"] [--filter 'DSL'] [--page-size 10] [--interval 3]
 tele --bot -- <command args...>               # Alternative: -- to avoid quoting
 
+# Ingest mode (external data sources)
+tele --ingest                                # Start daemon (watch + poll)
+tele --scan                                  # Scan all sources once
+tele --process-source {name}                 # Process specific source
+tele --list-sources                          # Show sources and state
+
 # Retry dead-letter queue
 tele --retry-dead ~/.tele/state/bot_{chat_id}_dead.jsonl [--exec "processor"]
 ```
@@ -42,6 +48,7 @@ tele --retry-dead ~/.tele/state/bot_{chat_id}_dead.jsonl [--exec "processor"]
 |------|-----|------------|----------|
 | App | MTProto (Telethon) | `{chat_id}.json` | Manual queries, scheduled jobs |
 | Bot | Bot API (HTTP) | `bot_{chat_id}.json` | Daemon monitoring, automation |
+| Ingest | File-based | `sources/{name}/state.json` | External data sources, automation |
 
 ### Key Files
 
@@ -54,10 +61,13 @@ tele --retry-dead ~/.tele/state/bot_{chat_id}_dead.jsonl [--exec "processor"]
 | `tele/state.py` | Incremental processing state |
 | `tele/output.py` | JSON Lines serialization |
 | `tele/config.py` | YAML/env config loading |
+| `tele/source_state.py` | Source consumption state tracking |
+| `tele/source_consumer.py` | Byte-offset file consumption |
+| `tele/source_watcher.py` | File monitoring (watchdog + polling) |
 
 ### Dependencies
 
-`telethon` (MTProto), `aiohttp` (HTTP), `click` (CLI), `pyyaml` (config)
+`telethon` (MTProto), `aiohttp` (HTTP), `click` (CLI), `pyyaml` (config), `watchdog` (file monitoring)
 
 ## Configuration
 
@@ -75,6 +85,18 @@ defaults:
   chat: work_chat
   reaction: "✅"
   batch_size: 100
+
+# External data sources (ingest mode)
+sources:
+  web_monitor:
+    path: ~/.tele/state/sources/web_monitor
+    processor: "my-web-processor"
+    filter: 'contains("important")'  # Optional
+    chat_id: 123                      # For notifications
+
+ingest:
+  poll_interval: 30                   # Seconds (polling fallback)
+  watch_enabled: true                 # File monitoring via watchdog
 ```
 
 Environment variables override config file:
@@ -155,12 +177,39 @@ Media types: `video` (≤50MB, size verified via HTTP HEAD), `image`. Each reply
 ├── bot_{chat_id}.json           # Offset state
 ├── bot_{chat_id}_pending.jsonl  # Messages awaiting processing
 ├── bot_{chat_id}_dead.jsonl     # Retriable errors after 3 retries
-└── bot_{chat_id}_fatal.jsonl    # Fatal errors (no retry)
+├── bot_{chat_id}_fatal.jsonl    # Fatal errors (no retry)
+├── sources/                     # External data sources
+│   ├── {source_name}/
+│   │   ├── incoming.YYYY-MM-DD.jsonl  # Append-only input (data source writes)
+│   │   ├── state.json                 # Consumption progress (tele tracks)
+│   │   ├── {source_name}_pending.jsonl # Retries (tele-managed)
+│   │   ├── {source_name}_dead.jsonl    # Exhausted retries (tele-managed)
+│   │   └── {source_name}_fatal.jsonl   # Fatal errors (tele-managed)
+│   └── {another_source}/
+│       └── ...
+└── ...
 ```
 
 ### Incremental Processing
 
 App mode tracks processed messages in `~/.tele/state/{chat_id}.json`. Use `--full` to ignore state.
+
+### Source Ingest Protocol
+
+Data sources write JSONL messages to `incoming.{date}.jsonl`:
+
+```json
+{"id": "unique_id", "chat_id": 123, "text": "...", "date": "2026-03-31T10:00:00Z"}
+```
+
+Required fields: `id`, `chat_id`, `text`, `date`
+
+**Core convention**: Date in filename always increases. Files with older dates are automatically considered complete.
+
+**Consumption**: Three-layer strategy for reliability:
+1. Watchdog events (primary) - immediate detection
+2. Polling fallback (30s) - safety net for missed events
+3. Manual trigger (`--scan`, `--process-source`)
 
 ## Testing
 

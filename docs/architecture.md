@@ -26,6 +26,19 @@
                  └─────────┘     (update offset on success only)
 ```
 
+### Ingest Mode
+
+```
+┌───────────────┐    ┌─────────────┐    ┌──────────────┐    ┌──────────┐
+│ Data Source   │───>│ JSONL File  │───>│ SourceWatcher│───>│ Executor │
+│ (external)    │    │ (append-only)│    │ (watch+poll) │    │          │
+└───────────────┘    └─────────────┘    └──────────────┘    └──────────┘
+                                            │                    │
+                                       ┌────┴────┐               │
+                                       │SourceState│<────────────┘
+                                       └──────────┘  (byte offset)
+```
+
 ## Components
 
 ### cli.py (Entry Point)
@@ -79,6 +92,57 @@ load_config() -> BotClient() -> poll_updates() -> filter() -> batch() -> exec() 
 - Groups (privacy ON): @mentions and commands only
 - Groups (privacy OFF): all messages
 - Channels (admin required): all posts
+
+### source_state.py (Source Consumption State)
+
+**Responsibility**: Track byte offset consumption progress for each source
+
+| Class | Purpose |
+|-------|---------|
+| `SourceState` | Dataclass: current_file, byte_offset, last_processed_at |
+| `SourceStateManager` | Load/save state, manage state.json files |
+
+**State File**: `~/.tele/state/sources/{name}/state.json`
+
+```json
+{
+  "current_file": "incoming.2026-03-30.jsonl",
+  "byte_offset": 5000,
+  "last_processed_at": "2026-03-31T10:00:00Z"
+}
+```
+
+**Core Convention**: Date in filename always increases. Files with older dates are automatically complete.
+
+### source_consumer.py (File Consumption)
+
+**Responsibility**: Read JSONL files from byte offset, handle partial lines
+
+| Function | Purpose |
+|----------|---------|
+| `consume_from_offset()` | Read from offset, yield complete lines |
+| `get_next_file()` | Find next file by date monotonicity |
+
+**Edge Cases**:
+- Partial line at EOF (mid-write) → Skip, wait for next read
+- File rotation → Move to next dated file automatically
+- Unicode → Binary mode with UTF-8 decoding per line
+
+### source_watcher.py (File Monitoring)
+
+**Responsibility**: Detect file changes via watchdog + polling fallback
+
+| Class | Purpose |
+|-------|---------|
+| `SourceWatcher` | Manage watchdog observer + polling timer |
+| `WatcherEvent` | Event dataclass for queue |
+
+**Three-Layer Detection**:
+1. Watchdog events (primary) - immediate file modification detection
+2. Polling fallback (30s default) - safety net for missed events
+3. Manual trigger (`--scan`, `--process-source`)
+
+**Cross-Platform**: watchdog uses inotify (Linux), kqueue/FSEvents (macOS), ReadDirectoryChangesW (Windows). All have limitations; polling ensures reliability.
 
 ### filter.py (DSL Engine)
 
@@ -162,6 +226,37 @@ Processor crash:
   3. After 3 retries: move to dead-letter file
 ```
 
+**Ingest Mode Persistence**:
+
+Data sources write to `incoming.{date}.jsonl` (append-only). Tele tracks consumption in `state.json` (byte offset). Files are preserved as audit logs.
+
+```
+Startup:
+  1. Load state.json → current_file, byte_offset
+  2. Scan directory → all incoming.*.jsonl files
+
+Main loop (watchdog + polling):
+  1. Detect file modification
+  2. Read from byte_offset → yield complete lines
+  3. Process each message through configured processor
+  4. Update byte_offset after success
+  5. When file exhausted → check for next dated file
+
+Error handling:
+  - status: success → Advance byte_offset
+  - status: error   → Move to {source}_pending.jsonl, retry with backoff
+  - status: fatal   → Move to {source}_fatal.jsonl, advance offset
+```
+
+**Key Differences**:
+
+| Aspect | Bot Mode | Ingest Mode |
+|--------|----------|-------------|
+| Input source | Telegram API | Local JSONL files |
+| Tracking | API offset | Byte offset |
+| File retention | Pending queue cleared | Audit logs kept forever |
+| File naming | Fixed names | Date-based (YYYY-MM-DD) |
+
 **Retry Dead-Letter**:
 
 ```bash
@@ -216,6 +311,10 @@ App mode does not have persistence for piped output. If the app crashes or is ki
 
 **YAML**: `~/.tele/config.yaml`
 
+**New Sections** (ingest mode):
+- `sources`: Dict of source configs (path, processor, filter, chat_id)
+- `ingest`: Global ingest settings (poll_interval, watch_enabled)
+
 ## Error Handling
 
 | Layer | Strategy |
@@ -234,6 +333,9 @@ App mode does not have persistence for piped output. If the app crashes or is ki
 | config.py | Env override, file parsing |
 | output.py | Serialization, status field |
 | bot_client.py | Polling, offset handling |
+| source_state.py | State persistence, source isolation |
+| source_consumer.py | Byte offset reading, partial lines, file rotation |
+| source_watcher.py | Watchdog events, polling fallback |
 | integration | E2E pipeline flows |
 
 Integration tests with real Telegram API require credentials (see `tests/integration_manual.py`).
