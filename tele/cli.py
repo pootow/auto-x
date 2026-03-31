@@ -18,6 +18,9 @@ from .bot_client import BotClient
 from .batch_picker import BatchPicker
 from .executor import run_exec_command
 from .log import setup_logging, get_logger, get_log_level_name, DATAFLOW
+from .source_state import SourceStateManager
+from .source_consumer import SourceConsumer
+from .source_watcher import SourceWatcher
 
 
 @click.command(context_settings={
@@ -41,6 +44,10 @@ from .log import setup_logging, get_logger, get_log_level_name, DATAFLOW
 @click.option('--interval', default=3.0, help='Debounce interval in seconds (bot mode)')
 @click.option('--exec', 'exec_cmd', help='Command to process messages (bot mode)')
 @click.option('--retry-dead', 'retry_dead', help='Retry dead-letter file (path to .jsonl)')
+@click.option('--ingest', 'ingest_mode', is_flag=True, help='Run ingest daemon (monitor sources)')
+@click.option('--scan', 'scan_mode', is_flag=True, help='Scan all sources once')
+@click.option('--process-source', 'process_source', help='Process specific source')
+@click.option('--list-sources', 'list_sources_mode', is_flag=True, help='List configured sources')
 @click.option('-v', '--verbose', count=True, help='Increase verbosity (-v, -vv, -vvv, -vvvv)')
 @click.pass_context
 def cli(
@@ -61,6 +68,10 @@ def cli(
     interval: float,
     exec_cmd: Optional[str],
     retry_dead: Optional[str],
+    ingest_mode: bool,
+    scan_mode: bool,
+    process_source: Optional[str],
+    list_sources_mode: bool,
     verbose: int,
 ) -> None:
     """Telegram message processing pipeline tool.
@@ -139,6 +150,26 @@ def cli(
             reaction=reaction,
             failed_mark=failed_mark,
         ))
+        return
+
+    # List sources mode
+    if list_sources_mode:
+        run_list_sources(config)
+        return
+
+    # Scan mode
+    if scan_mode:
+        asyncio.run(run_scan_mode(config))
+        return
+
+    # Process specific source mode
+    if process_source:
+        asyncio.run(run_process_source(config, process_source))
+        return
+
+    # Ingest daemon mode
+    if ingest_mode:
+        asyncio.run(run_ingest_mode(config, verbose))
         return
 
     # Mark mode
@@ -872,6 +903,205 @@ async def run_retry_dead(
 
     finally:
         await client.close()
+
+
+def run_list_sources(config) -> None:
+    """List all configured sources.
+
+    Args:
+        config: Configuration object
+    """
+    logger = get_logger("tele.ingest")
+
+    if not config.sources:
+        logger.info("No sources configured")
+        print("No sources configured.")
+        return
+
+    print("Configured sources:")
+    for name, source_cfg in config.sources.items():
+        # Display source info: name, processor, chat_id, filter (if set)
+        filter_str = f", filter: {source_cfg.filter}" if source_cfg.filter else ""
+        print(f"  - {name}: processor={source_cfg.processor}, chat_id={source_cfg.chat_id}{filter_str}")
+
+
+async def run_scan_mode(config) -> None:
+    """Scan all sources once and process any available messages.
+
+    Args:
+        config: Configuration object
+    """
+    logger = get_logger("tele.ingest")
+
+    if not config.sources:
+        logger.info("No sources configured")
+        print("No sources configured.")
+        return
+
+    state_manager = SourceStateManager()
+
+    # Check each configured source
+    total_processed = 0
+    for source_name in config.sources.keys():
+        # Check if source has state directory
+        source_dir = state_manager.get_source_dir(source_name)
+        if not source_dir.exists():
+            logger.debug("Source %s has no data directory yet", source_name)
+            continue
+
+        # Check for incoming files
+        incoming_files = state_manager.get_incoming_files(source_name)
+        if not incoming_files:
+            logger.debug("Source %s has no incoming files", source_name)
+            continue
+
+        logger.info("Scanning source %s (%d incoming files)", source_name, len(incoming_files))
+
+        # Process messages from this source
+        processed = await process_source_messages(config, source_name)
+        total_processed += processed
+
+    logger.info("Scan complete: processed %d messages", total_processed)
+    print(f"Scan complete. Processed {total_processed} messages from {len(config.sources)} sources.")
+
+
+async def run_process_source(config, source_name: str) -> None:
+    """Process a specific source by name.
+
+    Args:
+        config: Configuration object
+        source_name: Name of the source to process
+    """
+    logger = get_logger("tele.ingest")
+
+    # Check if source exists in config
+    if source_name not in config.sources:
+        logger.error("Source '%s' not found in config", source_name)
+        raise click.ClickException(f"Source '{source_name}' not found in config")
+
+    source_cfg = config.sources[source_name]
+    logger.info("Processing source %s (processor=%s, chat_id=%s)",
+                source_name, source_cfg.processor, source_cfg.chat_id)
+
+    # Process messages from this source
+    processed = await process_source_messages(config, source_name)
+
+    logger.info("Processed %d messages from source %s", processed, source_name)
+    print(f"Processed {processed} messages from source '{source_name}'.")
+
+
+async def process_source_messages(config, source_name: str) -> int:
+    """Consume and process messages from a source.
+
+    Args:
+        config: Configuration object
+        source_name: Name of the source to process
+
+    Returns:
+        Number of messages processed
+    """
+    logger = get_logger("tele.ingest")
+    source_cfg = config.sources[source_name]
+
+    state_manager = SourceStateManager()
+    consumer = SourceConsumer(source_name, state_manager)
+
+    # Consume all available messages
+    messages = consumer.consume_available()
+
+    if not messages:
+        logger.debug("No messages available from source %s", source_name)
+        return 0
+
+    logger.debug("Consumed %d messages from source %s", len(messages), source_name)
+
+    # Add chat_id to each message (required by processor protocol)
+    for msg in messages:
+        msg['chat_id'] = source_cfg.chat_id
+
+    # Run processor
+    results = await run_exec_command(source_cfg.processor, messages, shell=True)
+
+    # Count successful results
+    success_count = sum(1 for r in results if r.get('status') == 'success')
+
+    logger.debug("Processor returned %d results (%d success)", len(results), success_count)
+
+    return success_count
+
+
+async def run_ingest_mode(config, verbose: int = 0) -> None:
+    """Run ingest daemon with file monitoring.
+
+    Monitors source directories for new data files and processes messages
+    through configured processors.
+
+    Args:
+        config: Configuration object
+        verbose: Verbosity level
+    """
+    logger = get_logger("tele.ingest")
+
+    if not config.sources:
+        logger.warning("No sources configured")
+        print("No sources configured. Add sources to config.yaml to use ingest mode.")
+        return
+
+    # Initialize watcher with config settings
+    state_manager = SourceStateManager()
+    watcher = SourceWatcher(
+        state_dir=state_manager.state_dir,
+        poll_interval=config.ingest.poll_interval,
+        watch_enabled=config.ingest.watch_enabled,
+    )
+
+    # Ensure source directories exist for all configured sources
+    for source_name in config.sources.keys():
+        source_dir = state_manager.get_source_dir(source_name)
+        source_dir.mkdir(parents=True, exist_ok=True)
+        logger.debug("Ensured source directory exists: %s", source_dir)
+
+    logger.info("Starting ingest daemon for %d sources", len(config.sources))
+    print(f"Ingest daemon started. Monitoring {len(config.sources)} sources:")
+    for name in config.sources.keys():
+        print(f"  - {name}")
+
+    # Start watchdog if available
+    if watcher.WATCHDOG_AVAILABLE and config.ingest.watch_enabled:
+        watcher.start_watchdog()
+        logger.info("Watchdog monitoring started")
+    else:
+        logger.info("Using polling only (watchdog not available or disabled)")
+
+    try:
+        while True:
+            # Wait for changes
+            event = await watcher.wait_for_event(timeout=config.ingest.poll_interval)
+
+            if event:
+                source_name = event.source_name
+                logger.info("Change detected in source %s", source_name)
+
+                # Process messages from the changed source
+                if source_name in config.sources:
+                    processed = await process_source_messages(config, source_name)
+                    logger.info("Processed %d messages from source %s", processed, source_name)
+
+            # Periodic scan for all sources (catches any missed events)
+            sources_with_changes = watcher.get_sources_with_changes()
+            for source_name in sources_with_changes:
+                if source_name in config.sources and source_name != (event.source_name if event else None):
+                    logger.debug("Polling found changes in source %s", source_name)
+                    processed = await process_source_messages(config, source_name)
+                    if processed > 0:
+                        logger.info("Processed %d messages from source %s (via polling)", processed, source_name)
+
+    except KeyboardInterrupt:
+        logger.info("Shutting down ingest daemon...")
+        print("\nShutting down...")
+    finally:
+        watcher.stop_watchdog()
+        logger.info("Ingest daemon stopped")
 
 
 def main() -> None:
