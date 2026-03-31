@@ -65,10 +65,28 @@ class DefaultsConfig:
 
 
 @dataclass
+class SourceConfig:
+    """Configuration for a data source."""
+    processor: str
+    chat_id: int
+    filter: Optional[str] = None
+    path: Optional[str] = None
+
+
+@dataclass
+class IngestConfig:
+    """Configuration for ingest mode."""
+    poll_interval: float = 30.0
+    watch_enabled: bool = True
+
+
+@dataclass
 class Config:
     """Application configuration."""
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     defaults: DefaultsConfig = field(default_factory=DefaultsConfig)
+    sources: Dict[str, "SourceConfig"] = field(default_factory=dict)
+    ingest: "IngestConfig" = field(default_factory=IngestConfig)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Config":
@@ -108,7 +126,25 @@ class Config:
             batch_size=defaults_data.get('batch_size', 100),
         )
 
-        return cls(telegram=telegram, defaults=defaults)
+        # Parse sources
+        sources_data = data.get('sources', {})
+        sources = {}
+        for name, src_data in sources_data.items():
+            sources[name] = SourceConfig(
+                processor=src_data.get('processor', ''),
+                chat_id=src_data.get('chat_id', 0),
+                filter=src_data.get('filter'),
+                path=src_data.get('path'),
+            )
+
+        # Parse ingest
+        ingest_data = data.get('ingest', {})
+        ingest = IngestConfig(
+            poll_interval=ingest_data.get('poll_interval', 30.0),
+            watch_enabled=ingest_data.get('watch_enabled', True),
+        )
+
+        return cls(telegram=telegram, defaults=defaults, sources=sources, ingest=ingest)
 
     def to_dict(self) -> dict:
         """Convert Config to dictionary.
@@ -116,6 +152,18 @@ class Config:
         Returns:
             Dictionary representation
         """
+        sources_dict = {}
+        for name, src in self.sources.items():
+            src_dict = {
+                'processor': src.processor,
+                'chat_id': src.chat_id,
+            }
+            if src.filter is not None:
+                src_dict['filter'] = src.filter
+            if src.path is not None:
+                src_dict['path'] = src.path
+            sources_dict[name] = src_dict
+
         return {
             'telegram': {
                 'api_id': self.telegram.api_id,
@@ -132,6 +180,11 @@ class Config:
                 'chat': self.defaults.chat,
                 'reaction': self.defaults.reaction,
                 'batch_size': self.defaults.batch_size,
+            },
+            'sources': sources_dict,
+            'ingest': {
+                'poll_interval': self.ingest.poll_interval,
+                'watch_enabled': self.ingest.watch_enabled,
             },
         }
 

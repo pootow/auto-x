@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tele.config import Config, ConfigManager, TelegramConfig, DefaultsConfig, load_config, _normalize_api_endpoint
+from tele.config import Config, ConfigManager, TelegramConfig, DefaultsConfig, load_config, _normalize_api_endpoint, SourceConfig, IngestConfig
 
 
 class TestConfig:
@@ -198,6 +198,32 @@ class TestConfigManager:
         # Note: load() uses from_dict which normalizes, but save saves the normalized value
         assert loaded.telegram.bot_api_endpoint == "custom.api.server"
 
+    def test_roundtrip_with_sources_and_ingest(self, temp_config_dir):
+        """Test save and load roundtrip with sources and ingest."""
+        config_path = os.path.join(temp_config_dir, "config.yaml")
+        manager = ConfigManager(config_path)
+
+        original = Config(
+            telegram=TelegramConfig(api_id=12345, api_hash="test_hash"),
+            defaults=DefaultsConfig(chat="test_chat"),
+            sources={
+                "web_monitor": SourceConfig(
+                    processor="python monitor.py",
+                    chat_id=12345,
+                    filter='contains("urgent")'
+                )
+            },
+            ingest=IngestConfig(poll_interval=60.0, watch_enabled=False)
+        )
+        manager.save(original)
+
+        loaded = manager.load()
+        assert loaded.sources["web_monitor"].processor == "python monitor.py"
+        assert loaded.sources["web_monitor"].chat_id == 12345
+        assert loaded.sources["web_monitor"].filter == 'contains("urgent")'
+        assert loaded.ingest.poll_interval == 60.0
+        assert loaded.ingest.watch_enabled is False
+
 
 class TestNormalizeApiEndpoint:
     """Test cases for _normalize_api_endpoint function."""
@@ -279,3 +305,136 @@ class TestEndpointRoutingLookup:
         # sendVideo only in first
         result = config.get_endpoint_for_method("sendVideo")
         assert result == "endpoint_a"
+
+
+class TestSourceConfig:
+    """Test cases for SourceConfig dataclass."""
+
+    def test_source_config_required_fields(self):
+        """Test SourceConfig with required fields only."""
+        source = SourceConfig(processor="python monitor.py", chat_id=12345)
+        assert source.processor == "python monitor.py"
+        assert source.chat_id == 12345
+        assert source.filter is None
+        assert source.path is None
+
+    def test_source_config_all_fields(self):
+        """Test SourceConfig with all fields."""
+        source = SourceConfig(
+            processor="rss-processor",
+            chat_id=67890,
+            filter='contains("important")',
+            path="/custom/data/source"
+        )
+        assert source.processor == "rss-processor"
+        assert source.chat_id == 67890
+        assert source.filter == 'contains("important")'
+        assert source.path == "/custom/data/source"
+
+
+class TestIngestConfig:
+    """Test cases for IngestConfig dataclass."""
+
+    def test_ingest_config_defaults(self):
+        """Test IngestConfig default values."""
+        ingest = IngestConfig()
+        assert ingest.poll_interval == 30.0
+        assert ingest.watch_enabled is True
+
+    def test_ingest_config_custom_values(self):
+        """Test IngestConfig with custom values."""
+        ingest = IngestConfig(poll_interval=60.0, watch_enabled=False)
+        assert ingest.poll_interval == 60.0
+        assert ingest.watch_enabled is False
+
+
+class TestConfigSourcesAndIngest:
+    """Test cases for Config sources and ingest sections."""
+
+    def test_default_config_has_empty_sources(self):
+        """Test default Config has empty sources."""
+        config = Config()
+        assert config.sources == {}
+        assert config.ingest.poll_interval == 30.0
+        assert config.ingest.watch_enabled is True
+
+    def test_from_dict_with_sources(self):
+        """Test creating config with sources."""
+        data = {
+            "sources": {
+                "web_monitor": {
+                    "processor": "python monitor.py",
+                    "chat_id": 12345
+                },
+                "rss_feed": {
+                    "processor": "rss-processor",
+                    "chat_id": 67890,
+                    "filter": 'contains("important")',
+                    "path": "/data/rss"
+                }
+            }
+        }
+        config = Config.from_dict(data)
+        assert len(config.sources) == 2
+        assert "web_monitor" in config.sources
+        assert "rss_feed" in config.sources
+
+        web_monitor = config.sources["web_monitor"]
+        assert web_monitor.processor == "python monitor.py"
+        assert web_monitor.chat_id == 12345
+        assert web_monitor.filter is None
+        assert web_monitor.path is None
+
+        rss_feed = config.sources["rss_feed"]
+        assert rss_feed.processor == "rss-processor"
+        assert rss_feed.chat_id == 67890
+        assert rss_feed.filter == 'contains("important")'
+        assert rss_feed.path == "/data/rss"
+
+    def test_from_dict_with_ingest(self):
+        """Test creating config with ingest settings."""
+        data = {
+            "ingest": {
+                "poll_interval": 60,
+                "watch_enabled": False
+            }
+        }
+        config = Config.from_dict(data)
+        assert config.ingest.poll_interval == 60
+        assert config.ingest.watch_enabled is False
+
+    def test_to_dict_with_sources(self):
+        """Test serializing config with sources."""
+        config = Config(
+            sources={
+                "web_monitor": SourceConfig(
+                    processor="python monitor.py",
+                    chat_id=12345
+                ),
+                "rss_feed": SourceConfig(
+                    processor="rss-processor",
+                    chat_id=67890,
+                    filter='contains("important")',
+                    path="/data/rss"
+                )
+            }
+        )
+        data = config.to_dict()
+        assert "sources" in data
+        assert len(data["sources"]) == 2
+        assert data["sources"]["web_monitor"]["processor"] == "python monitor.py"
+        assert data["sources"]["web_monitor"]["chat_id"] == 12345
+        assert "filter" not in data["sources"]["web_monitor"]
+        assert "path" not in data["sources"]["web_monitor"]
+        assert data["sources"]["rss_feed"]["filter"] == 'contains("important")'
+        assert data["sources"]["rss_feed"]["path"] == "/data/rss"
+
+    def test_to_dict_with_ingest(self):
+        """Test serializing config with ingest settings."""
+        config = Config(
+            ingest=IngestConfig(poll_interval=45.0, watch_enabled=False)
+        )
+        data = config.to_dict()
+        assert "ingest" in data
+        assert data["ingest"]["poll_interval"] == 45.0
+        assert data["ingest"]["watch_enabled"] is False
