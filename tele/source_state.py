@@ -131,3 +131,36 @@ class SourceStateManager:
         # Sort by date in filename (incoming.YYYY-MM-DD.jsonl)
         files.sort(key=lambda p: p.name)
         return files
+
+    def get_next_file(self, source_name: str, current_file: str) -> Optional[Path]:
+        """Get the next incoming file after current_file.
+
+        Uses date comparison: files with date > current_file date are next.
+        Returns None if no files remain.
+
+        Args:
+            source_name: Source identifier
+            current_file: Current file name (e.g., "incoming.2026-03-30.jsonl")
+
+        Returns:
+            Path to next file, or None if no more files
+        """
+        files = self.get_incoming_files(source_name)
+        if not files:
+            return None
+
+        # No current file, return first file
+        if not current_file:
+            return files[0]
+
+        # Extract date from current_file name
+        # Format: incoming.YYYY-MM-DD.jsonl
+        current_date = current_file.replace("incoming.", "").replace(".jsonl", "")
+
+        # Find first file with date > current_date
+        for f in files:
+            file_date = f.name.replace("incoming.", "").replace(".jsonl", "")
+            if file_date > current_date:
+                return f
+
+        return None

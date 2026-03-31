@@ -195,3 +195,52 @@ class TestSourceStateManager:
         # Verify no temp file remains
         temp_path = manager.get_state_path("my_source").with_suffix('.tmp')
         assert not temp_path.exists()
+
+    def test_get_next_file_after_current(self, temp_state_dir):
+        """get_next_file should return files with date > current_file."""
+        manager = SourceStateManager(state_dir=temp_state_dir)
+        source_dir = manager.get_source_dir("test_source")
+        source_dir.mkdir(parents=True)
+
+        (source_dir / "incoming.2026-03-29.jsonl").touch()
+        (source_dir / "incoming.2026-03-30.jsonl").touch()
+        (source_dir / "incoming.2026-03-31.jsonl").touch()
+
+        # Current file is 03-30, next should be 03-31
+        next_file = manager.get_next_file("test_source", "incoming.2026-03-30.jsonl")
+        assert next_file is not None
+        assert next_file.name == "incoming.2026-03-31.jsonl"
+
+    def test_get_next_file_no_more_files(self, temp_state_dir):
+        """get_next_file returns None when no files after current."""
+        manager = SourceStateManager(state_dir=temp_state_dir)
+        source_dir = manager.get_source_dir("test_source")
+        source_dir.mkdir(parents=True)
+
+        (source_dir / "incoming.2026-03-30.jsonl").touch()
+
+        next_file = manager.get_next_file("test_source", "incoming.2026-03-30.jsonl")
+        assert next_file is None
+
+    def test_get_next_file_empty_current(self, temp_state_dir):
+        """get_next_file returns first file when current_file is empty."""
+        manager = SourceStateManager(state_dir=temp_state_dir)
+        source_dir = manager.get_source_dir("test_source")
+        source_dir.mkdir(parents=True)
+
+        (source_dir / "incoming.2026-03-29.jsonl").touch()
+        (source_dir / "incoming.2026-03-30.jsonl").touch()
+
+        # Empty current file should return first file
+        next_file = manager.get_next_file("test_source", "")
+        assert next_file is not None
+        assert next_file.name == "incoming.2026-03-29.jsonl"
+
+    def test_get_next_file_no_incoming_files(self, temp_state_dir):
+        """get_next_file returns None when no incoming files exist."""
+        manager = SourceStateManager(state_dir=temp_state_dir)
+        source_dir = manager.get_source_dir("test_source")
+        source_dir.mkdir(parents=True)
+
+        next_file = manager.get_next_file("test_source", "")
+        assert next_file is None
