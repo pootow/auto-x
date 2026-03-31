@@ -26,6 +26,21 @@ class TestInferLevel:
         assert level == "WARN "
         assert line == "Deprecated feature"
 
+    def test_simple_prefix_debug(self):
+        level, line = infer_level("[DEBUG] Verbose output")
+        assert level == "DEBUG"
+        assert line == "Verbose output"
+
+    def test_empty_line_defaults_to_info(self):
+        level, line = infer_level("")
+        assert level == "INFO "
+        assert line == ""
+
+    def test_line_with_only_prefix(self):
+        level, line = infer_level("[INFO ]")
+        assert level == "INFO "
+        assert line == ""
+
     def test_error_keywords(self):
         level, line = infer_level("Error: something failed")
         assert level == "ERROR"
