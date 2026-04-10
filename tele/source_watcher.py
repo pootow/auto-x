@@ -9,7 +9,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Set
+from typing import Optional, Set, Dict
 
 from tele.source_state import SourceStateManager, STATE_DIR_DEFAULT
 
@@ -106,18 +106,25 @@ class SourceWatcher:
     def __init__(
         self,
         state_dir: Optional[Path] = None,
+        sources_dir: Optional[Path] = None,
+        source_paths: Optional[Dict[str, Path]] = None,
         poll_interval: float = 30.0,
-        watch_enabled: bool = True
+        watch_enabled: bool = True,
+        configured_sources: Optional[Set[str]] = None
     ):
         """Initialize the source watcher.
 
         Args:
             state_dir: Directory for state files (default: ~/.tele/state)
+            sources_dir: Directory for source data (default: state_dir/sources)
+            source_paths: Custom paths for specific sources (overrides sources_dir)
             poll_interval: Seconds between polling checks
             watch_enabled: Whether to attempt watchdog monitoring
+            configured_sources: Set of source names to watch (default: all existing)
         """
         self.state_dir = state_dir or STATE_DIR_DEFAULT
-        self.state_manager = SourceStateManager(state_dir=self.state_dir)
+        self.configured_sources = configured_sources
+        self.state_manager = SourceStateManager(state_dir=self.state_dir, sources_dir=sources_dir, source_paths=source_paths)
         self.poll_interval = poll_interval
         self.watch_enabled = watch_enabled
 
@@ -149,8 +156,9 @@ class SourceWatcher:
                 self._loop = None
 
             self._observer = Observer()
-            # Watch each existing source directory
-            for source_name in self.state_manager.list_sources():
+            # Watch configured sources (or all existing if not specified)
+            sources_to_watch = self.configured_sources if self.configured_sources else self.state_manager.list_sources()
+            for source_name in sources_to_watch:
                 self._add_source_watch(source_name)
             self._observer.start()
             logger.info("Started watchdog observer for %d sources", len(self._handlers))
@@ -201,7 +209,8 @@ class SourceWatcher:
         """
         sources_with_changes: Set[str] = set()
 
-        for source_name in self.state_manager.list_sources():
+        sources_to_check = self.configured_sources if self.configured_sources else self.state_manager.list_sources()
+        for source_name in sources_to_check:
             if self._source_has_changes(source_name):
                 sources_with_changes.add(source_name)
 

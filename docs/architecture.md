@@ -102,7 +102,11 @@ load_config() -> BotClient() -> poll_updates() -> filter() -> batch() -> exec() 
 | `SourceState` | Dataclass: current_file, byte_offset, last_processed_at |
 | `SourceStateManager` | Load/save state, manage state.json files |
 
-**State File**: `~/.tele/state/sources/{name}/state.json`
+**State File**: `{source_dir}/state.json`
+
+Source directory resolution:
+- If `sources.{name}.path` is configured → use that path
+- Otherwise → `{ingest.sources_dir}/{name}/` (default: `~/.tele/state/sources/{name}/`)
 
 ```json
 {
@@ -136,6 +140,8 @@ load_config() -> BotClient() -> poll_updates() -> filter() -> batch() -> exec() 
 |-------|---------|
 | `SourceWatcher` | Manage watchdog observer + polling timer |
 | `WatcherEvent` | Event dataclass for queue |
+
+**Scope**: Only monitors sources configured in `config.yaml`. Unconfigured source directories are ignored.
 
 **Three-Layer Detection**:
 1. Watchdog events (primary) - immediate file modification detection
@@ -312,8 +318,8 @@ App mode does not have persistence for piped output. If the app crashes or is ki
 **YAML**: `~/.tele/config.yaml`
 
 **New Sections** (ingest mode):
-- `sources`: Dict of source configs (path, processor, filter, chat_id)
-- `ingest`: Global ingest settings (poll_interval, watch_enabled)
+- `sources`: Dict of source configs (processor, filter, chat_id)
+- `ingest`: Global ingest settings (poll_interval, watch_enabled, sources_dir)
 
 ## Error Handling
 

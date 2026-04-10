@@ -905,6 +905,18 @@ async def run_retry_dead(
         await client.close()
 
 
+def _build_source_paths(config) -> dict:
+    """Build source_paths dict from config.
+
+    Returns dict mapping source_name -> Path for sources with custom path configured.
+    """
+    source_paths = {}
+    for name, source_cfg in config.sources.items():
+        if source_cfg.path:
+            source_paths[name] = Path(source_cfg.path)
+    return source_paths
+
+
 def run_list_sources(config) -> None:
     """List all configured sources.
 
@@ -938,7 +950,10 @@ async def run_scan_mode(config) -> None:
         print("No sources configured.")
         return
 
-    state_manager = SourceStateManager()
+    state_manager = SourceStateManager(
+        sources_dir=Path(config.ingest.sources_dir) if config.ingest.sources_dir else None,
+        source_paths=_build_source_paths(config)
+    )
 
     # Check each configured source
     total_processed = 0
@@ -1003,7 +1018,10 @@ async def process_source_messages(config, source_name: str) -> int:
     logger = get_logger("tele.ingest")
     source_cfg = config.sources[source_name]
 
-    state_manager = SourceStateManager()
+    state_manager = SourceStateManager(
+        sources_dir=Path(config.ingest.sources_dir) if config.ingest.sources_dir else None,
+        source_paths=_build_source_paths(config)
+    )
     consumer = SourceConsumer(source_name, state_manager)
 
     # Consume all available messages
@@ -1048,11 +1066,16 @@ async def run_ingest_mode(config, verbose: int = 0) -> None:
         return
 
     # Initialize watcher with config settings
-    state_manager = SourceStateManager()
+    sources_dir = Path(config.ingest.sources_dir) if config.ingest.sources_dir else None
+    source_paths = _build_source_paths(config)
+    state_manager = SourceStateManager(sources_dir=sources_dir, source_paths=source_paths)
     watcher = SourceWatcher(
         state_dir=state_manager.state_dir,
+        sources_dir=sources_dir,
+        source_paths=source_paths,
         poll_interval=config.ingest.poll_interval,
         watch_enabled=config.ingest.watch_enabled,
+        configured_sources=set(config.sources.keys()),
     )
 
     # Ensure source directories exist for all configured sources

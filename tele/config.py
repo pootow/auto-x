@@ -78,6 +78,7 @@ class IngestConfig:
     """Configuration for ingest mode."""
     poll_interval: float = 30.0
     watch_enabled: bool = True
+    sources_dir: Optional[str] = None
 
 
 @dataclass
@@ -142,6 +143,7 @@ class Config:
         ingest = IngestConfig(
             poll_interval=ingest_data.get('poll_interval', 30.0),
             watch_enabled=ingest_data.get('watch_enabled', True),
+            sources_dir=ingest_data.get('sources_dir'),
         )
 
         return cls(telegram=telegram, defaults=defaults, sources=sources, ingest=ingest)
@@ -185,6 +187,7 @@ class Config:
             'ingest': {
                 'poll_interval': self.ingest.poll_interval,
                 'watch_enabled': self.ingest.watch_enabled,
+                **({'sources_dir': self.ingest.sources_dir} if self.ingest.sources_dir else {}),
             },
         }
 

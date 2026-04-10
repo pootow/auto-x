@@ -89,7 +89,7 @@ defaults:
 # External data sources (ingest mode)
 sources:
   web_monitor:
-    path: ~/.tele/state/sources/web_monitor
+    path: ~/.tele/state/sources/web_monitor  # Optional: custom path for this source
     processor: "my-web-processor"
     filter: 'contains("important")'  # Optional
     chat_id: 123                      # For notifications
@@ -97,6 +97,7 @@ sources:
 ingest:
   poll_interval: 30                   # Seconds (polling fallback)
   watch_enabled: true                 # File monitoring via watchdog
+  sources_dir: ~/.tele/state/sources  # Optional: default sources directory (overridden by source.path)
 ```
 
 Environment variables override config file:

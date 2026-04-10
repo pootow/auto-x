@@ -308,10 +308,10 @@ class TestStateFileContract:
 
         # Write multiple times
         for i in range(10):
-            state_mgr.save(chat_id=123, update_id=i * 10)
+            state_mgr.save(update_id=i * 10)
 
         # Final read should be valid
-        state = state_mgr.load(123)
+        state = state_mgr.load()
         assert state["last_update_id"] == 90
 
     def test_chat_state_dataclass_format(self, tmp_path):

@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict
 from dataclasses import dataclass, asdict
 
 logger = logging.getLogger(__name__)
@@ -61,13 +61,22 @@ class SourceStateManager:
     - {source_name}_fatal.jsonl (fatal errors)
     """
 
-    def __init__(self, state_dir: Optional[Path] = None):
+    def __init__(self, state_dir: Optional[Path] = None, sources_dir: Optional[Path] = None, source_paths: Optional[Dict[str, Path]] = None):
         self.state_dir = state_dir or STATE_DIR_DEFAULT
-        self.sources_dir = self.state_dir / SOURCES_DIR
+        self.sources_dir = sources_dir or (self.state_dir / SOURCES_DIR)
+        self.source_paths = source_paths or {}
         self.sources_dir.mkdir(parents=True, exist_ok=True)
 
     def get_source_dir(self, source_name: str) -> Path:
-        """Get the directory for a specific source."""
+        """Get the directory for a specific source.
+
+        If source has a configured path in source_paths, use that.
+        Otherwise use default {sources_dir}/{source_name}/.
+        """
+        if source_name in self.source_paths:
+            path = self.source_paths[source_name]
+            path.mkdir(parents=True, exist_ok=True)
+            return path
         return self.sources_dir / source_name
 
     def get_state_path(self, source_name: str) -> Path:
